@@ -4,7 +4,7 @@ import os
 import logging
 import datetime
 
-# Set up logging
+# Set up logging1
 logging.basicConfig(level=logging.INFO, format='%(asctime)s - %(levelname)s - %(message)s')
 logger = logging.getLogger(__name__)
 
