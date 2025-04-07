@@ -4,12 +4,40 @@ import os
 import logging
 import datetime
 import numpy as np
+import subprocess
+import importlib.util
 
 # Set up logging
 logging.basicConfig(level=logging.INFO, format='%(asctime)s - %(levelname)s - %(message)s')
 logger = logging.getLogger(__name__)
 
-# Import packages
+# Check and install required packages
+required_packages = ['requests', 'pandas', 'beautifulsoup4', 'pandas_ta']
+
+for package in required_packages:
+    try:
+        if package == 'pandas_ta':
+            # Check if pandas_ta is installed
+            if importlib.util.find_spec("pandas_ta") is None:
+                logger.info(f"Installing {package}...")
+                subprocess.check_call([sys.executable, "-m", "pip", "install", package])
+                logger.info(f"{package} installed successfully.")
+            else:
+                logger.info(f"{package} is already installed.")
+        else:
+            # For other packages, just import to check
+            __import__(package)
+    except (ImportError, subprocess.CalledProcessError) as e:
+        logger.error(f"Error installing {package}: {str(e)}")
+        logger.info(f"Attempting to install {package}...")
+        try:
+            subprocess.check_call([sys.executable, "-m", "pip", "install", package])
+            logger.info(f"{package} installed successfully.")
+        except subprocess.CalledProcessError as e:
+            logger.error(f"Failed to install {package}: {str(e)}")
+            sys.exit(1)
+
+# Import packages (after ensuring they're installed)
 import requests
 import pandas as pd
 from bs4 import BeautifulSoup
