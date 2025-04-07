@@ -1,8 +1,6 @@
 #!/usr/bin/env python3
 import sys
-import subprocess
 import os
-import time
 import logging
 import datetime
 
@@ -10,32 +8,14 @@ import datetime
 logging.basicConfig(level=logging.INFO, format='%(asctime)s - %(levelname)s - %(message)s')
 logger = logging.getLogger(__name__)
 
-# Function to install dependencies
-def install_dependencies():
-    logger.info("Checking and installing dependencies...")
-    required_packages = ["requests", "pandas", "schedule", "beautifulsoup4"]
-    
-    for package in required_packages:
-        try:
-            __import__(package)
-            logger.info(f"{package} is already installed")
-        except ImportError:
-            logger.info(f"Installing {package}...")
-            subprocess.check_call([sys.executable, "-m", "pip", "install", package])
-            logger.info(f"{package} has been installed")
-
-# Install dependencies
-install_dependencies()
-
-# Now import the packages
+# Import packages
 import requests
 import pandas as pd
-import schedule
 from bs4 import BeautifulSoup
 
-# Telegram configuration
-API_KEY = "8017759392:AAEwM-W-y83lLXTjlPl8sC_aBmizuIrFXnU"
-CHAT_ID = "711856868"
+# Telegram configuration - using environment variables for security
+API_KEY = os.environ.get("TELEGRAM_API_KEY", "8017759392:AAEwM-W-y83lLXTjlPl8sC_aBmizuIrFXnU")
+CHAT_ID = os.environ.get("TELEGRAM_CHAT_ID", "711856868")
 BASE_URL = f"https://api.telegram.org/bot{API_KEY}"
 
 # Function to send message to Telegram
@@ -65,9 +45,6 @@ def get_nifty_stocks():
             "Accept-Language": "en-US,en;q=0.9",
             "Accept-Encoding": "gzip, deflate, br"
         }
-        
-        # Due to potential restrictions on the NSE API, we're using a more simplified approach
-        # In production, you would handle session cookies and proper headers for NSE API
         
         try:
             session = requests.Session()
@@ -143,8 +120,6 @@ def get_gift_nifty():
             session.get("https://www.nseindia.com/", timeout=10)
             
             # Then get GIFT Nifty data
-            # In a real implementation, you'd have to find the correct endpoint for GIFT Nifty
-            # This is a placeholder that would get regular Nifty data
             response = session.get(url, timeout=10)
             if response.status_code == 200:
                 # Process actual data
@@ -199,15 +174,10 @@ def format_stock_data(nifty_data, gift_nifty):
         logger.error(f"Error formatting data: {str(e)}")
         return "Error formatting stock data."
 
-# Function to send the scheduled message
-def send_scheduled_message():
+# Main function to run the bot
+def main():
     try:
-        logger.info("Preparing scheduled message...")
-        
-        # Send hello message
-        current_time = datetime.datetime.now().strftime('%Y-%m-%d %H:%M:%S')
-        hello_message = f"Hello! Here's your 3-hour update at {current_time}"
-        send_telegram_message(hello_message)
+        logger.info("Starting Nifty Telegram Bot for GitHub Actions...")
         
         # Get stock data
         nifty_data = get_nifty_stocks()
@@ -215,164 +185,28 @@ def send_scheduled_message():
         
         # Format and send stock data
         if not nifty_data.empty and gift_nifty:
+            # Send a message with the current time
+            current_time = datetime.datetime.now().strftime('%Y-%m-%d %H:%M:%S')
+            hello_message = f"NIFTY 50 and GIFT Nifty update at {current_time}"
+            send_telegram_message(hello_message)
+            
+            # Send the formatted stock data
             stock_message = format_stock_data(nifty_data, gift_nifty)
             send_telegram_message(stock_message)
+            
+            logger.info("Stock data sent successfully")
         else:
             send_telegram_message("Unable to fetch stock data at this time.")
+            logger.error("Failed to fetch stock data")
             
-        logger.info("Scheduled message sent successfully")
-    except Exception as e:
-        logger.error(f"Error in scheduled task: {str(e)}")
-        try:
-            send_telegram_message(f"Error occurred while fetching stock data: {str(e)}")
-        except:
-            pass
-
-# Send initial message
-def send_initial_message():
-    send_telegram_message("Bot started! You will receive Nifty 50 and GIFT Nifty updates every 3 hours.")
-    send_scheduled_message()  # Send first update immediately
-
-# Function to make script auto-run on startup (platform specific)
-def setup_autorun():
-    try:
-        # Get the absolute path of the current script
-        script_path = os.path.abspath(__file__)
-        
-        if sys.platform.startswith('win'):  # Windows
-            import winreg
-            # Create a registry key for auto-run
-            key_path = r"Software\Microsoft\Windows\CurrentVersion\Run"
-            key = winreg.OpenKey(winreg.HKEY_CURRENT_USER, key_path, 0, winreg.KEY_SET_VALUE)
-            winreg.SetValueEx(key, "NiftyTelegramBot", 0, winreg.REG_SZ, f'pythonw "{script_path}"')
-            winreg.CloseKey(key)
-            logger.info("Set up auto-run on Windows startup")
-            
-        elif sys.platform.startswith('linux'):  # Linux
-            # Create a systemd service file
-            service_content = f"""[Unit]
-Description=Nifty Telegram Bot Service
-After=network.target
-
-[Service]
-ExecStart={sys.executable} {script_path}
-Restart=always
-User={os.getlogin()}
-Environment=PYTHONUNBUFFERED=1
-
-[Install]
-WantedBy=multi-user.target
-"""
-            service_path = os.path.expanduser("~/.config/systemd/user/nifty_telegram_bot.service")
-            os.makedirs(os.path.dirname(service_path), exist_ok=True)
-            
-            with open(service_path, "w") as f:
-                f.write(service_content)
-                
-            # Enable and start the service
-            subprocess.run(["systemctl", "--user", "enable", "nifty_telegram_bot.service"])
-            subprocess.run(["systemctl", "--user", "start", "nifty_telegram_bot.service"])
-            logger.info("Set up auto-run as systemd user service on Linux")
-            
-        elif sys.platform == 'darwin':  # macOS
-            # Create a launch agent plist file
-            plist_content = f"""<?xml version="1.0" encoding="UTF-8"?>
-<!DOCTYPE plist PUBLIC "-//Apple//DTD PLIST 1.0//EN" "http://www.apple.com/DTDs/PropertyList-1.0.dtd">
-<plist version="1.0">
-<dict>
-    <key>Label</key>
-    <string>com.user.niftytelegrambot</string>
-    <key>ProgramArguments</key>
-    <array>
-        <string>{sys.executable}</string>
-        <string>{script_path}</string>
-    </array>
-    <key>RunAtLoad</key>
-    <true/>
-    <key>KeepAlive</key>
-    <true/>
-</dict>
-</plist>
-"""
-            plist_path = os.path.expanduser("~/Library/LaunchAgents/com.user.niftytelegrambot.plist")
-            
-            with open(plist_path, "w") as f:
-                f.write(plist_content)
-                
-            # Load the agent
-            subprocess.run(["launchctl", "load", plist_path])
-            logger.info("Set up auto-run as Launch Agent on macOS")
-        
-        else:
-            logger.warning(f"Auto-run setup not supported for {sys.platform}")
-            
-    except Exception as e:
-        logger.error(f"Failed to set up auto-run: {str(e)}")
-        logger.info("You'll need to manually set up this script to run on startup")
-
-# Set up auto-run configuration
-def configure_autorun():
-    try:
-        # Ask for confirmation before setting up auto-run
-        setup_autorun()
-    except Exception as e:
-        logger.error(f"Error setting up auto-run: {str(e)}")
-
-# Main function to run the bot
-def main():
-    try:
-        # Configure auto-run on system startup
-        configure_autorun()
-        
-        # Send initial message
-        send_initial_message()
-        
-        # Schedule message every 3 hours
-        schedule.every(3).hours.do(send_scheduled_message)
-        
-        logger.info("Bot started. Scheduled to send updates every 3 hours.")
-        
-        # Keep the script running
-        while True:
-            schedule.run_pending()
-            time.sleep(60)  # Check every minute for pending tasks
-    except KeyboardInterrupt:
-        logger.info("Bot stopped by user")
     except Exception as e:
         logger.error(f"Unexpected error: {str(e)}")
         # Try to notify about the error
         try:
-            send_telegram_message(f"Bot encountered a critical error and stopped: {str(e)}")
+            send_telegram_message(f"Bot encountered an error: {str(e)}")
         except:
             pass
 
-# Add self-execution capability
+# Execute the main function when script is run
 if __name__ == "__main__":
     main()
-else:
-    # If being imported as a module, provide a run function
-    def run_bot():
-        main()
-
-# Add explicit run code at the end of the file
-# This ensures the script runs itself even if executed with exec() or similar methods
-if __name__ == "__main__":
-    # This is redundant with the previous check, but ensures the script always runs
-    try:
-        logger.info("Starting Nifty Telegram Bot...")
-        
-        # If this file was run directly from Python
-        if sys.argv[0].endswith('nifty_telegram_bot.py'):
-            main()
-        # If this file was executed through another method
-        else:
-            # Try to run with python executable
-            script_path = os.path.abspath(__file__)
-            logger.info(f"Attempting to run with Python executable: {script_path}")
-            subprocess.Popen([sys.executable, script_path])
-    except Exception as e:
-        logger.error(f"Failed to start bot: {str(e)}")
-        
-# Direct execution command as the very last line
-# This is a fallback for certain execution environments
-# python nifty_telegram_bot.py
