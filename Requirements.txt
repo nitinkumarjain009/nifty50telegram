@@ -1,0 +1,7 @@
+requests>=2.28.0
+pandas>=1.5.0
+beautifulsoup4>=4.11.0
+pandas_ta>=0.3.14b
+pywhatkit>=5.4
+pywhatsapp>=0.0.7
+numpy>=1.22.0
