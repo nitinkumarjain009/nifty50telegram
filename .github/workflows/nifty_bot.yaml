@@ -27,6 +27,18 @@ jobs:
             pip install requests pandas beautifulsoup4 pandas_ta twilio numpy
           fi
       
+      - name: Patch pandas_ta library
+        run: |
+          echo "Patching pandas_ta squeeze_pro.py file to fix numpy NaN import..."
+          SQUEEZE_PRO_PATH=$(python -c "import os; import pandas_ta; print(os.path.join(os.path.dirname(pandas_ta.__file__), 'momentum/squeeze_pro.py'))")
+          echo "File path: $SQUEEZE_PRO_PATH"
+          if [ -f "$SQUEEZE_PRO_PATH" ]; then
+            sed -i 's/from numpy import NaN as npNaN/from numpy import nan as npNaN/' "$SQUEEZE_PRO_PATH"
+            echo "Patch applied successfully."
+          else
+            echo "Warning: Could not find the squeeze_pro.py file. Patching failed."
+          fi
+      
       - name: Send startup notification
         run: |
           echo "Sending bot startup notification..."
