@@ -12,11 +12,11 @@ logging.basicConfig(level=logging.INFO, format='%(asctime)s - %(levelname)s - %(
 logger = logging.getLogger(__name__)
 
 # Check and install required packages
-required_packages = ['requests', 'pandas', 'beautifulsoup4', 'pandas_ta', 'pywhatkit', 'pywhatsapp']
+required_packages = ['requests', 'pandas', 'beautifulsoup4', 'pandas_ta', 'twilio']
 
 for package in required_packages:
     try:
-        if package in ['pandas_ta', 'pywhatkit', 'pywhatsapp']:
+        if package in ['pandas_ta', 'twilio']:
             # Check if specific packages are installed
             if importlib.util.find_spec(package) is None:
                 logger.info(f"Installing {package}...")
@@ -42,7 +42,7 @@ import requests
 import pandas as pd
 from bs4 import BeautifulSoup
 import pandas_ta as ta
-import pywhatkit
+from twilio.rest import Client
 
 # Telegram configuration - using environment variables for security with fallback to hardcoded values
 # WARNING: Hardcoded fallback API key is a security risk. Use environment variables.
@@ -50,9 +50,12 @@ API_KEY = os.environ.get("TELEGRAM_API_KEY", "8017759392:AAEwM-W-y83lLXTjlPl8sC_
 CHAT_ID = os.environ.get("TELEGRAM_CHAT_ID", "@stockniftybot")  # Using channel username
 BASE_URL = f"https://api.telegram.org/bot{API_KEY}"
 
-# WhatsApp configuration
-WHATSAPP_GROUP = "Moneymine"
-WHATSAPP_ADMIN = "+918376906697"
+# WhatsApp configuration via Twilio
+WHATSAPP_GROUP = os.environ.get("WHATSAPP_GROUP", "Moneymine")
+WHATSAPP_ADMIN = os.environ.get("WHATSAPP_ADMIN", "+918376906697")
+TWILIO_ACCOUNT_SID = os.environ.get("TWILIO_ACCOUNT_SID")
+TWILIO_AUTH_TOKEN = os.environ.get("TWILIO_AUTH_TOKEN")
+TWILIO_FROM_NUMBER = os.environ.get("TWILIO_FROM_NUMBER")  # Must be a Twilio WhatsApp enabled number
 
 # Function to debug Telegram connection
 def debug_telegram_connection():
@@ -92,25 +95,32 @@ def send_telegram_message(text):
     except Exception as e:
         logger.error(f"Error sending message: {str(e)}")
 
-# Function to send message to WhatsApp group
+# Function to send message to WhatsApp using Twilio
 def send_whatsapp_message(text):
+    if not all([TWILIO_ACCOUNT_SID, TWILIO_AUTH_TOKEN, TWILIO_FROM_NUMBER]):
+        logger.warning("Twilio credentials not found. WhatsApp messaging disabled.")
+        return False
+    
     try:
-        # First connect with the admin
-        current_time = datetime.datetime.now()
-        # Add 2 minutes to allow pywhatkit to set up
-        send_time = current_time + datetime.timedelta(minutes=2)
+        # Initialize Twilio client
+        client = Client(TWILIO_ACCOUNT_SID, TWILIO_AUTH_TOKEN)
         
-        # Send message to WhatsApp group admin
-        pywhatkit.sendwhatmsg(
-            WHATSAPP_ADMIN, 
-            f"Nifty Bot Alert for {WHATSAPP_GROUP}:\n\n{text}", 
-            send_time.hour, 
-            send_time.minute,
-            wait_time=30  # Seconds to wait before sending message
+        # Format message with group name
+        formatted_message = f"📊 *{WHATSAPP_GROUP}* Alert 📊\n\n{text}"
+        
+        # Send message via Twilio WhatsApp API
+        message = client.messages.create(
+            body=formatted_message,
+            from_=f"whatsapp:{TWILIO_FROM_NUMBER}",
+            to=f"whatsapp:{WHATSAPP_ADMIN}"
         )
-        logger.info(f"WhatsApp message scheduled to {WHATSAPP_GROUP} via admin at {send_time.strftime('%H:%M')}")
+        
+        logger.info(f"WhatsApp message sent successfully to {WHATSAPP_ADMIN}. SID: {message.sid}")
+        return True
+        
     except Exception as e:
         logger.error(f"Error sending WhatsApp message: {str(e)}")
+        return False
 
 # Function to get historical price data for technical indicators calculation (SIMULATED DATA)
 def get_historical_data(symbol, timeframe='1M', periods=100):
@@ -356,10 +366,28 @@ def format_results_message(results):
     
     return message
 
+# Function to check if Twilio is properly configured
+def check_twilio_config():
+    if not all([TWILIO_ACCOUNT_SID, TWILIO_AUTH_TOKEN, TWILIO_FROM_NUMBER]):
+        logger.warning("Twilio credentials missing. WhatsApp functionality will be disabled.")
+        return False
+    
+    try:
+        # Test Twilio client initialization
+        client = Client(TWILIO_ACCOUNT_SID, TWILIO_AUTH_TOKEN)
+        logger.info("Twilio client initialized successfully.")
+        return True
+    except Exception as e:
+        logger.error(f"Failed to initialize Twilio client: {str(e)}")
+        return False
+
 # Main execution
 if __name__ == "__main__":
     try:
         logger.info("Starting Nifty Bot analysis...")
+        
+        # Check Twilio configuration
+        twilio_configured = check_twilio_config()
         
         # List of symbols to analyze
         symbols = ["NIFTY50", "BANKNIFTY", "RELIANCE", "TCS", "HDFC", "INFY"]
@@ -373,8 +401,9 @@ if __name__ == "__main__":
         # Send to Telegram
         send_telegram_message(message)
         
-        # Send to WhatsApp
-        send_whatsapp_message(message)
+        # Send to WhatsApp if configured
+        if twilio_configured:
+            send_whatsapp_message(message)
         
         logger.info("Analysis complete and messages sent.")
         
