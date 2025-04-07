@@ -13,25 +13,46 @@ import requests
 import pandas as pd
 from bs4 import BeautifulSoup
 
-# Telegram configuration - using environment variables for security
+# Telegram configuration - using environment variables for security with fallback to hardcoded values
 API_KEY = os.environ.get("TELEGRAM_API_KEY", "8017759392:AAEwM-W-y83lLXTjlPl8sC_aBmizuIrFXnU")
-CHAT_ID = os.environ.get("TELEGRAM_CHAT_ID", "711856868")
+CHAT_ID = os.environ.get("TELEGRAM_CHAT_ID", "@stockniftybot")  # Using channel username
 BASE_URL = f"https://api.telegram.org/bot{API_KEY}"
 
-# Function to send message to Telegram
+# Function to debug Telegram connection
+def debug_telegram_connection():
+    try:
+        # Get bot info to check if token is valid
+        test_url = f"{BASE_URL}/getMe"
+        response = requests.get(test_url)
+        if response.status_code == 200:
+            bot_info = response.json()
+            logger.info(f"Bot connection successful. Bot name: {bot_info['result']['first_name']}")
+        else:
+            logger.error(f"Bot connection failed: {response.text}")
+            
+        # Test channel posting permission
+        test_message = "Testing bot permissions in this channel."
+        send_telegram_message(test_message)
+        
+    except Exception as e:
+        logger.error(f"Debug test failed: {str(e)}")
+
+# Function to send message to Telegram channel
 def send_telegram_message(text):
     url = f"{BASE_URL}/sendMessage"
     payload = {
-        "chat_id": CHAT_ID,
+        "chat_id": CHAT_ID,  # Using channel username: @stockniftybot
         "text": text,
         "parse_mode": "Markdown"
     }
+    
     try:
         response = requests.post(url, data=payload)
         if response.status_code == 200:
-            logger.info("Message sent successfully")
+            logger.info(f"Message sent successfully to {CHAT_ID}")
         else:
-            logger.error(f"Failed to send message: {response.text}")
+            error_info = response.json() if response.text else "No error details"
+            logger.error(f"Failed to send message: {error_info}")
     except Exception as e:
         logger.error(f"Error sending message: {str(e)}")
 
@@ -178,6 +199,9 @@ def format_stock_data(nifty_data, gift_nifty):
 def main():
     try:
         logger.info("Starting Nifty Telegram Bot for GitHub Actions...")
+        
+        # Debug Telegram connection first
+        debug_telegram_connection()
         
         # Get stock data
         nifty_data = get_nifty_stocks()
