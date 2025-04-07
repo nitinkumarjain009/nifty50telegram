@@ -1,5 +1,4 @@
 name: Nifty Bot Analysis Scheduler
-
 on:
   schedule:
     # Run at 9:15 AM and 3:45 PM IST on weekdays (3:45 AM and 10:15 AM UTC)
@@ -7,7 +6,6 @@ on:
   
   # Allow manual trigger from GitHub Actions tab
   workflow_dispatch:
-
 jobs:
   run-nifty-bot:
     runs-on: ubuntu-latest
@@ -29,7 +27,18 @@ jobs:
             pip install requests pandas beautifulsoup4 pandas_ta twilio numpy
           fi
       
+      - name: Send startup notification
+        run: |
+          echo "Sending bot startup notification..."
+          if [ -n "${{ secrets.TELEGRAM_API_KEY }}" ] && [ -n "${{ secrets.TELEGRAM_CHAT_ID }}" ]; then
+            curl -s -X POST "https://api.telegram.org/bot${{ secrets.TELEGRAM_API_KEY }}/sendMessage" \
+            -d chat_id="${{ secrets.TELEGRAM_CHAT_ID }}" \
+            -d text="🚀 Nifty Bot Analysis started running at $(date)"
+          fi
+      
       - name: Run Nifty Bot Script
+        id: run_script
+        continue-on-error: true
         env:
           TELEGRAM_API_KEY: ${{ secrets.TELEGRAM_API_KEY }}
           TELEGRAM_CHAT_ID: ${{ secrets.TELEGRAM_CHAT_ID }}
@@ -40,3 +49,24 @@ jobs:
           TWILIO_FROM_NUMBER: ${{ secrets.TWILIO_FROM_NUMBER }}
         run: |
           python nifty_telegram_bot_github.py
+      
+      - name: Check for errors
+        if: steps.run_script.outcome == 'failure'
+        run: |
+          echo "Script execution failed. Sending notification..."
+          # If you have Telegram integration already, you can send failure notification
+          if [ -n "${{ secrets.TELEGRAM_API_KEY }}" ] && [ -n "${{ secrets.TELEGRAM_CHAT_ID }}" ]; then
+            curl -s -X POST "https://api.telegram.org/bot${{ secrets.TELEGRAM_API_KEY }}/sendMessage" \
+            -d chat_id="${{ secrets.TELEGRAM_CHAT_ID }}" \
+            -d text="⚠️ Nifty Bot Analysis failed to run. Please check GitHub Actions logs."
+          fi
+      
+      - name: Upload logs on failure
+        if: steps.run_script.outcome == 'failure'
+        uses: actions/upload-artifact@v3
+        with:
+          name: error-logs
+          path: |
+            *.log
+            *.txt
+          retention-days: 5
