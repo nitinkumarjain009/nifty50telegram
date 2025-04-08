@@ -4,3 +4,8 @@ beautifulsoup4>=4.11.0
 pandas_ta>=0.3.14b
 twilio>=7.14.0
 numpy>=1.22.0
+yfinance 
+ta 
+pytz 
+apscheduler 
+flask
