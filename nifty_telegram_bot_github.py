@@ -1,416 +1,278 @@
-#!/usr/bin/env python3
-import sys
-import os
-import logging
-import datetime
+import pandas as pd
 import numpy as np
-import subprocess
-import importlib.util
+import yfinance as yf
+import requests
+from ta.momentum import RSIIndicator
+import pytz
+from datetime import datetime, time
+import logging
+from apscheduler.schedulers.blocking import BlockingScheduler
+import os
+from flask import Flask, render_template_string
+import threading
 
-# Set up logging
+# Configure logging
 logging.basicConfig(level=logging.INFO, format='%(asctime)s - %(levelname)s - %(message)s')
 logger = logging.getLogger(__name__)
 
-# Check and install required packages
-required_packages = ['requests', 'pandas', 'beautifulsoup4', 'pandas_ta', 'twilio']
+# Telegram configuration
+TELEGRAM_TOKEN = 'YOUR_TELEGRAM_BOT_TOKEN'
+TELEGRAM_CHAT_ID = 'YOUR_TELEGRAM_CHAT_ID'
 
-for package in required_packages:
+# Flask app for web display
+app = Flask(__name__)
+oversold_stocks = []
+
+# Configuration
+NIFTY_INDEX = "^NSEI"  # Nifty 50 index
+NIFTY_STOCKS_FILE = "nifty50_stocks.csv"  # You'll need to create this CSV with stock symbols
+RSI_PERIOD = 14
+RSI_THRESHOLD = 30
+
+def calculate_rsi(ticker_symbol, period=14):
+    """Calculate RSI for a given stock ticker."""
     try:
-        if package in ['pandas_ta', 'twilio']:
-            # Check if specific packages are installed
-            if importlib.util.find_spec(package) is None:
-                logger.info(f"Installing {package}...")
-                subprocess.check_call([sys.executable, "-m", "pip", "install", package])
-                logger.info(f"{package} installed successfully.")
-            else:
-                logger.info(f"{package} is already installed.")
-        else:
-            # For other packages, just import to check
-            __import__(package)
-    except (ImportError, subprocess.CalledProcessError) as e:
-        logger.error(f"Error installing {package}: {str(e)}")
-        logger.info(f"Attempting to install {package}...")
-        try:
-            subprocess.check_call([sys.executable, "-m", "pip", "install", package])
-            logger.info(f"{package} installed successfully.")
-        except subprocess.CalledProcessError as e:
-            logger.error(f"Failed to install {package}: {str(e)}")
-            sys.exit(1)
-
-# Import packages (after ensuring they're installed)
-import requests
-import pandas as pd
-from bs4 import BeautifulSoup
-import pandas_ta as ta
-from twilio.rest import Client
-
-# Telegram configuration - using environment variables for security with fallback to hardcoded values
-# WARNING: Hardcoded fallback API key is a security risk. Use environment variables.
-API_KEY = os.environ.get("TELEGRAM_API_KEY", "8017759392:AAEwM-W-y83lLXTjlPl8sC_aBmizuIrFXnU")
-CHAT_ID = os.environ.get("TELEGRAM_CHAT_ID", "@stockniftybot")  # Using channel username
-BASE_URL = f"https://api.telegram.org/bot{API_KEY}"
-
-# WhatsApp configuration via Twilio
-WHATSAPP_GROUP = os.environ.get("WHATSAPP_GROUP", "Moneymine")
-WHATSAPP_ADMIN = os.environ.get("WHATSAPP_ADMIN", "+918376906697")
-TWILIO_ACCOUNT_SID = os.environ.get("TWILIO_ACCOUNT_SID")
-TWILIO_AUTH_TOKEN = os.environ.get("TWILIO_AUTH_TOKEN")
-TWILIO_FROM_NUMBER = os.environ.get("TWILIO_FROM_NUMBER")  # Must be a Twilio WhatsApp enabled number
-
-# Function to debug Telegram connection
-def debug_telegram_connection():
-    try:
-        # Get bot info to check if token is valid
-        test_url = f"{BASE_URL}/getMe"
-        response = requests.get(test_url)
-        if response.status_code == 200:
-            bot_info = response.json()
-            logger.info(f"Bot connection successful. Bot name: {bot_info['result']['first_name']}")
-        else:
-            logger.error(f"Bot connection failed: {response.text}")
-
-        # Test channel posting permission
-        test_message = "Testing bot permissions in this channel."
-        send_telegram_message(test_message)
-
-    except Exception as e:
-        logger.error(f"Debug test failed: {str(e)}")
-
-# Function to send message to Telegram channel
-def send_telegram_message(text):
-    url = f"{BASE_URL}/sendMessage"
-    payload = {
-        "chat_id": CHAT_ID,  # Using channel username: @stockniftybot
-        "text": text,
-        "parse_mode": "Markdown"
-    }
-
-    try:
-        response = requests.post(url, data=payload)
-        if response.status_code == 200:
-            logger.info(f"Message sent successfully to {CHAT_ID}")
-        else:
-            error_info = response.json() if response.text else "No error details"
-            logger.error(f"Failed to send message: {error_info}")
-    except Exception as e:
-        logger.error(f"Error sending message: {str(e)}")
-
-# Function to send message to WhatsApp using Twilio
-def send_whatsapp_message(text):
-    if not all([TWILIO_ACCOUNT_SID, TWILIO_AUTH_TOKEN, TWILIO_FROM_NUMBER]):
-        logger.warning("Twilio credentials not found. WhatsApp messaging disabled.")
-        return False
-    
-    try:
-        # Initialize Twilio client
-        client = Client(TWILIO_ACCOUNT_SID, TWILIO_AUTH_TOKEN)
+        # Get data for the last 30 days to have enough data points for RSI calculation
+        data = yf.download(ticker_symbol, period="30d", interval="1d", progress=False)
         
-        # Format message with group name
-        formatted_message = f"📊 *{WHATSAPP_GROUP}* Alert 📊\n\n{text}"
+        if data.empty or len(data) < period:
+            logger.warning(f"Not enough data for {ticker_symbol}")
+            return None, None
         
-        # Send message via Twilio WhatsApp API
-        message = client.messages.create(
-            body=formatted_message,
-            from_=f"whatsapp:{TWILIO_FROM_NUMBER}",
-            to=f"whatsapp:{WHATSAPP_ADMIN}"
-        )
+        # Calculate RSI
+        rsi_indicator = RSIIndicator(close=data['Close'], window=period)
+        data['RSI'] = rsi_indicator.rsi()
         
-        logger.info(f"WhatsApp message sent successfully to {WHATSAPP_ADMIN}. SID: {message.sid}")
-        return True
+        # Get the latest values
+        latest_rsi = data['RSI'].iloc[-1]
+        latest_price = data['Close'].iloc[-1]
         
-    except Exception as e:
-        logger.error(f"Error sending WhatsApp message: {str(e)}")
-        return False
-
-# Function to get historical price data for technical indicators calculation (SIMULATED DATA)
-def get_historical_data(symbol, timeframe='1M', periods=100):
-    try:
-        # In real implementation, this would fetch data from an API
-        # For now, generating sample data
-        end_date = datetime.datetime.now()
-
-        # Determine date range based on timeframe
-        if timeframe == '1M':
-            # Monthly data
-            start_date = end_date - datetime.timedelta(days=periods*30)
-        elif timeframe == '1W':
-            # Weekly data
-            start_date = end_date - datetime.timedelta(days=periods*7)
-        elif timeframe == '1D':
-            # Daily data
-            start_date = end_date - datetime.timedelta(days=periods)
-        else:
-            # Default to daily
-            start_date = end_date - datetime.timedelta(days=periods)
-
-        date_range = pd.date_range(start=start_date, end=end_date, periods=periods)
-
-        # Generate sample data based on symbol hash for consistency
-        np.random.seed(sum(ord(c) for c in symbol))
-        
-        # Generate price data with a trend and volatility
-        base_price = 1000 + (sum(ord(c) for c in symbol) % 5000)
-        trend = 0.001 * (sum(ord(c) for c in symbol) % 10 - 5)  # Between -0.005 and 0.005
-        volatility = 0.01 + 0.005 * (sum(ord(c) for c in symbol) % 5)  # Between 0.01 and 0.035
-        
-        # Generate price series with random walk
-        prices = [base_price]
-        volumes = []
-        
-        for i in range(1, periods):
-            new_price = prices[-1] * (1 + trend + np.random.normal(0, volatility))
-            prices.append(new_price)
-            volumes.append(int(np.random.normal(1000000, 300000)))
-
-        # Create DataFrame
-        df = pd.DataFrame({
-            'Date': date_range,
-            'Open': prices,
-            'High': [p * (1 + np.random.uniform(0, 0.02)) for p in prices],
-            'Low': [p * (1 - np.random.uniform(0, 0.02)) for p in prices],
-            'Close': prices,
-            'Volume': volumes
-        })
-        
-        df.set_index('Date', inplace=True)
-        return df
-        
-    except Exception as e:
-        logger.error(f"Error generating historical data: {str(e)}")
-        return pd.DataFrame()
-
-# Calculate all technical indicators
-def calculate_indicators(df):
-    if df.empty:
-        return df
-    
-    try:
-        # RSI (Relative Strength Index)
-        df['RSI'] = ta.rsi(df['Close'], length=14)
-        
-        # MACD (Moving Average Convergence Divergence)
-        macd = ta.macd(df['Close'])
-        df = pd.concat([df, macd], axis=1)
-        
-        # Bollinger Bands
-        bbands = ta.bbands(df['Close'])
-        df = pd.concat([df, bbands], axis=1)
-        
-        # Moving Averages
-        df['SMA_20'] = ta.sma(df['Close'], length=20)
-        df['SMA_50'] = ta.sma(df['Close'], length=50)
-        df['SMA_200'] = ta.sma(df['Close'], length=200)
-        df['EMA_12'] = ta.ema(df['Close'], length=12)
-        df['EMA_26'] = ta.ema(df['Close'], length=26)
-        
-        # Stochastic Oscillator
-        stoch = ta.stoch(df['High'], df['Low'], df['Close'])
-        df = pd.concat([df, stoch], axis=1)
-        
-        # ATR (Average True Range) - Volatility indicator
-        df['ATR'] = ta.atr(df['High'], df['Low'], df['Close'])
-        
-        # ADX (Average Directional Index) - Trend strength
-        adx = ta.adx(df['High'], df['Low'], df['Close'])
-        df = pd.concat([df, adx], axis=1)
-        
-        # CCI (Commodity Channel Index)
-        df['CCI'] = ta.cci(df['High'], df['Low'], df['Close'])
-        
-        # OBV (On-Balance Volume)
-        df['OBV'] = ta.obv(df['Close'], df['Volume'])
-        
-        # Percentage Change (last column - most important as per requirements)
-        df['Pct_Change'] = df['Close'].pct_change() * 100
-        
-        return df
+        return latest_rsi, latest_price
     
     except Exception as e:
-        logger.error(f"Error calculating indicators: {str(e)}")
-        return df
+        logger.error(f"Error calculating RSI for {ticker_symbol}: {e}")
+        return None, None
 
-# Generate signals based on indicators
-def generate_signals(df):
-    if df.empty:
-        return {}
-    
+def get_nifty_stocks():
+    """Get the list of Nifty stocks from CSV file or fallback to a sample list."""
     try:
-        latest = df.iloc[-1]
-        signals = {}
-        
-        # RSI signals
-        if latest['RSI'] < 30:
-            signals['RSI'] = "Oversold (Buy Signal)"
-        elif latest['RSI'] > 70:
-            signals['RSI'] = "Overbought (Sell Signal)"
+        if os.path.exists(NIFTY_STOCKS_FILE):
+            df = pd.read_csv(NIFTY_STOCKS_FILE)
+            return df['Symbol'].tolist()
         else:
-            signals['RSI'] = "Neutral"
-            
-        # MACD signals
-        if latest['MACD_12_26_9'] > latest['MACDs_12_26_9'] and df.iloc[-2]['MACD_12_26_9'] <= df.iloc[-2]['MACDs_12_26_9']:
-            signals['MACD'] = "Bullish Crossover (Buy Signal)"
-        elif latest['MACD_12_26_9'] < latest['MACDs_12_26_9'] and df.iloc[-2]['MACD_12_26_9'] >= df.iloc[-2]['MACDs_12_26_9']:
-            signals['MACD'] = "Bearish Crossover (Sell Signal)"
-        else:
-            signals['MACD'] = "No Crossover"
-            
-        # Moving Average signals
-        if latest['Close'] > latest['SMA_200']:
-            signals['Trend'] = "Bullish (Above 200 SMA)"
-        else:
-            signals['Trend'] = "Bearish (Below 200 SMA)"
-            
-        # Golden/Death Cross
-        if latest['SMA_50'] > latest['SMA_200'] and df.iloc[-2]['SMA_50'] <= df.iloc[-2]['SMA_200']:
-            signals['Cross'] = "Golden Cross (Major Buy Signal)"
-        elif latest['SMA_50'] < latest['SMA_200'] and df.iloc[-2]['SMA_50'] >= df.iloc[-2]['SMA_200']:
-            signals['Cross'] = "Death Cross (Major Sell Signal)"
-        else:
-            signals['Cross'] = "No Cross"
-            
-        # Bollinger Band signals
-        if latest['Close'] < latest['BBL_5_2.0']:
-            signals['Bollinger'] = "Below Lower Band (Potential Buy)"
-        elif latest['Close'] > latest['BBU_5_2.0']:
-            signals['Bollinger'] = "Above Upper Band (Potential Sell)"
-        else:
-            signals['Bollinger'] = "Within Bands"
-            
-        # Percentage change
-        signals['Pct_Change'] = f"{latest['Pct_Change']:.2f}%"
-        
-        return signals
-    
+            # Fallback to a sample of Nifty 50 stocks
+            logger.warning(f"{NIFTY_STOCKS_FILE} not found. Using sample stock list.")
+            return ["RELIANCE.NS", "TCS.NS", "HDFCBANK.NS", "INFY.NS", "ICICIBANK.NS", 
+                    "HDFC.NS", "ITC.NS", "KOTAKBANK.NS", "LT.NS", "HINDUNILVR.NS"]
     except Exception as e:
-        logger.error(f"Error generating signals: {str(e)}")
-        return {"Error": str(e)}
+        logger.error(f"Error loading stock list: {e}")
+        return []
 
-# Main function to analyze stocks and send alerts
-def analyze_stocks(symbols):
+def analyze_stocks():
+    """Analyze stocks for RSI < 30 condition."""
+    stocks = get_nifty_stocks()
     results = []
     
-    for symbol in symbols:
-        try:
-            # Get historical data
-            df = get_historical_data(symbol, timeframe='1D', periods=200)
+    for stock in stocks:
+        # Ensure proper Yahoo Finance ticker format
+        if not stock.endswith(".NS") and not stock.endswith(".BO"):
+            stock_symbol = f"{stock}.NS"
+        else:
+            stock_symbol = stock
             
-            # Calculate indicators
-            df = calculate_indicators(df)
-            
-            # Generate signals
-            signals = generate_signals(df)
-            
-            # Add to results
-            result = {
-                'Symbol': symbol,
-                'Pct_Change': signals.get('Pct_Change', 'N/A'),
-                'RSI': signals.get('RSI', 'N/A'),
-                'MACD': signals.get('MACD', 'N/A'),
-                'Trend': signals.get('Trend', 'N/A'),
-                'Bollinger': signals.get('Bollinger', 'N/A')
-            }
-            results.append(result)
-            
-        except Exception as e:
-            logger.error(f"Error analyzing {symbol}: {str(e)}")
+        rsi, price = calculate_rsi(stock_symbol, RSI_PERIOD)
+        
+        if rsi is not None and rsi < RSI_THRESHOLD:
+            stock_name = stock.replace(".NS", "").replace(".BO", "")
             results.append({
-                'Symbol': symbol,
-                'Pct_Change': 'Error',
-                'RSI': 'N/A',
-                'MACD': 'N/A',
-                'Trend': 'N/A',
-                'Bollinger': 'N/A'
+                "symbol": stock_name,
+                "rsi": round(rsi, 2),
+                "price": round(price, 2)
             })
+            logger.info(f"Found oversold stock: {stock_name} with RSI: {rsi:.2f}")
     
     return results
 
-# Create formatted message from results
-def format_results_message(results):
+def send_telegram_message(message):
+    """Send message to Telegram channel."""
+    try:
+        url = f"https://api.telegram.org/bot{TELEGRAM_TOKEN}/sendMessage"
+        payload = {
+            "chat_id": TELEGRAM_CHAT_ID,
+            "text": message,
+            "parse_mode": "HTML"
+        }
+        response = requests.post(url, data=payload)
+        if response.status_code == 200:
+            logger.info("Telegram message sent successfully")
+        else:
+            logger.error(f"Failed to send Telegram message: {response.text}")
+    except Exception as e:
+        logger.error(f"Error sending Telegram message: {e}")
+
+def format_message(results):
+    """Format the analysis results as a Telegram message."""
     if not results:
-        return "No results available."
+        return "No Nifty stocks with RSI below 30 found today."
     
-    message = "📊 *Stock Analysis Report* 📊\n\n"
-    message += "```\n"
-    message += f"{'Symbol':<10}{'% Change':<10}{'Signal':<15}\n"
-    message += "-" * 35 + "\n"
+    current_date = datetime.now(pytz.timezone('Asia/Kolkata')).strftime("%d-%b-%Y")
     
-    for result in results:
-        symbol = result['Symbol']
-        pct_change = result['Pct_Change']
-        
-        # Determine primary signal based on multiple indicators
-        signal = "NEUTRAL"
-        if "Buy" in result['RSI'] and "Buy" in result['MACD']:
-            signal = "STRONG BUY"
-        elif "Sell" in result['RSI'] and "Sell" in result['MACD']:
-            signal = "STRONG SELL"
-        elif "Buy" in result['RSI'] or "Buy" in result['MACD']:
-            signal = "BUY"
-        elif "Sell" in result['RSI'] or "Sell" in result['MACD']:
-            signal = "SELL"
-        
-        message += f"{symbol:<10}{pct_change:<10}{signal:<15}\n"
+    message = f"<b>🔍 Nifty Oversold Stocks Analysis ({current_date})</b>\n\n"
+    message += "<b>Stocks with RSI below 30:</b>\n\n"
     
-    message += "```\n\n"
-    message += "💡 *Technical Indicators*\n"
+    for stock in results:
+        message += f"• <b>{stock['symbol']}</b>: RSI = {stock['rsi']} | Price = ₹{stock['price']}\n"
     
-    # Add detailed analysis for important stocks (e.g., NIFTY index)
-    for result in results[:1]:  # Only for the first stock (assumed to be main index)
-        message += f"\n*{result['Symbol']}*:\n"
-        message += f"• RSI: {result['RSI']}\n"
-        message += f"• MACD: {result['MACD']}\n"
-        message += f"• Trend: {result['Trend']}\n"
-        message += f"• Bollinger: {result['Bollinger']}\n"
-    
-    message += "\n⚠️ This is automated analysis for informational purposes only. Not financial advice."
-    
+    message += "\n<i>These stocks may be technically oversold. Consider for potential entry with proper risk management.</i>"
     return message
 
-# Function to check if Twilio is properly configured
-def check_twilio_config():
-    if not all([TWILIO_ACCOUNT_SID, TWILIO_AUTH_TOKEN, TWILIO_FROM_NUMBER]):
-        logger.warning("Twilio credentials missing. WhatsApp functionality will be disabled.")
-        return False
+@app.route('/')
+def home():
+    """Render the web page with analysis results."""
+    current_date = datetime.now(pytz.timezone('Asia/Kolkata')).strftime("%d-%b-%Y")
     
-    try:
-        # Test Twilio client initialization
-        client = Client(TWILIO_ACCOUNT_SID, TWILIO_AUTH_TOKEN)
-        logger.info("Twilio client initialized successfully.")
-        return True
-    except Exception as e:
-        logger.error(f"Failed to initialize Twilio client: {str(e)}")
-        return False
+    html_template = '''
+    <!DOCTYPE html>
+    <html>
+    <head>
+        <title>Nifty RSI Analysis</title>
+        <style>
+            body {
+                font-family: Arial, sans-serif;
+                margin: 0;
+                padding: 20px;
+                line-height: 1.6;
+                color: #333;
+                max-width: 800px;
+                margin: 0 auto;
+            }
+            h1 {
+                color: #2c3e50;
+                border-bottom: 2px solid #3498db;
+                padding-bottom: 10px;
+            }
+            .stock-card {
+                background-color: #f9f9f9;
+                border-radius: 5px;
+                padding: 15px;
+                margin-bottom: 10px;
+                box-shadow: 0 2px 4px rgba(0,0,0,0.1);
+            }
+            .stock-symbol {
+                font-weight: bold;
+                font-size: 18px;
+                color: #2980b9;
+            }
+            .stock-details {
+                display: flex;
+                justify-content: space-between;
+                margin-top: 10px;
+            }
+            .disclaimer {
+                margin-top: 30px;
+                font-style: italic;
+                color: #7f8c8d;
+                border-top: 1px solid #eee;
+                padding-top: 15px;
+            }
+            .last-updated {
+                text-align: right;
+                font-size: 14px;
+                color: #95a5a6;
+            }
+            .no-stocks {
+                padding: 20px;
+                background-color: #f8f9fa;
+                text-align: center;
+                border-radius: 5px;
+            }
+        </style>
+    </head>
+    <body>
+        <h1>Nifty Stocks RSI Analysis</h1>
+        <p class="last-updated">Last updated: {{ date }}</p>
+        
+        {% if stocks %}
+            <h2>Stocks with RSI below 30 (Potentially Oversold)</h2>
+            {% for stock in stocks %}
+                <div class="stock-card">
+                    <div class="stock-symbol">{{ stock.symbol }}</div>
+                    <div class="stock-details">
+                        <span>RSI: <strong>{{ stock.rsi }}</strong></span>
+                        <span>Price: <strong>₹{{ stock.price }}</strong></span>
+                    </div>
+                </div>
+            {% endfor %}
+        {% else %}
+            <div class="no-stocks">
+                <p>No Nifty stocks with RSI below 30 found today.</p>
+            </div>
+        {% endif %}
+        
+        <div class="disclaimer">
+            <p>Disclaimer: This information is for educational purposes only and should not be considered as financial advice. 
+            Always do your own research before making investment decisions.</p>
+        </div>
+    </body>
+    </html>
+    '''
+    
+    return render_template_string(html_template, stocks=oversold_stocks, date=current_date)
 
-# Main execution
-if __name__ == "__main__":
-    try:
-        logger.info("Starting Nifty Bot analysis...")
-        
-        # Check Twilio configuration
-        twilio_configured = check_twilio_config()
-        
-        # List of symbols to analyze
-        symbols = ["NIFTY50", "BANKNIFTY", "RELIANCE", "TCS", "HDFC", "INFY"]
-        
-        # Analyze stocks
-        results = analyze_stocks(symbols)
-        
-        # Format message
-        message = format_results_message(results)
-        
-        # Send to Telegram
+def run_flask_app():
+    """Run the Flask app on a separate thread."""
+    app.run(host='0.0.0.0', port=5000)
+
+def run_daily_analysis():
+    """Run the analysis, send to Telegram and update webpage."""
+    global oversold_stocks
+    
+    logger.info("Starting daily RSI analysis for Nifty stocks...")
+    
+    # Check if market is closed (after 3:30 PM IST)
+    ist_now = datetime.now(pytz.timezone('Asia/Kolkata'))
+    market_closed = ist_now.time() > time(15, 30)
+    
+    if not market_closed:
+        logger.info("Market still open. Waiting until after market hours.")
+        return
+    
+    # Run analysis
+    results = analyze_stocks()
+    oversold_stocks = results  # Update global variable for web display
+    
+    # Send to Telegram
+    if results:
+        message = format_message(results)
         send_telegram_message(message)
-        
-        # Send to WhatsApp if configured
-        if twilio_configured:
-            send_whatsapp_message(message)
-        
-        logger.info("Analysis complete and messages sent.")
-        
-    except Exception as e:
-        logger.error(f"Critical error in main execution: {str(e)}")
-        error_message = f"⚠️ Nifty Bot encountered a critical error: {str(e)}"
-        try:
-            send_telegram_message(error_message)
-        except:
-            logger.critical("Failed to send error notification to Telegram")
+        logger.info(f"Analysis complete. Found {len(results)} oversold stocks.")
+    else:
+        logger.info("Analysis complete. No oversold stocks found.")
+
+def start_scheduler():
+    """Start the scheduler to run the analysis daily after market hours."""
+    scheduler = BlockingScheduler(timezone=pytz.timezone('Asia/Kolkata'))
+    
+    # Run every weekday (Monday to Friday) at 4:00 PM IST
+    scheduler.add_job(
+        run_daily_analysis, 
+        'cron', 
+        day_of_week='mon-fri', 
+        hour=16, 
+        minute=0
+    )
+    
+    logger.info("Scheduler started. Will run analysis at 4:00 PM IST on weekdays.")
+    scheduler.start()
+
+if __name__ == "__main__":
+    # Start Flask in a separate thread
+    flask_thread = threading.Thread(target=run_flask_app)
+    flask_thread.daemon = True
+    flask_thread.start()
+    
+    # Run initial analysis
+    run_daily_analysis()
+    
+    # Start scheduler for daily runs
+    start_scheduler()
