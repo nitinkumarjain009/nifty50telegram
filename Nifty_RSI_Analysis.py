@@ -29,7 +29,7 @@ NIFTY_INDEX = "^NSEI"  # Nifty 50 index
 NIFTY_STOCKS_FILE = "nifty50_stocks.csv"  # You'll need to create this CSV with stock symbols
 RSI_PERIOD = 14
 OVERSOLD_THRESHOLD = 30
-OVERBOUGHT_THRESHOLD = 60
+OVERBOUGHT_THRESHOLD = 70
 
 def calculate_rsi(ticker_symbol, period=14, timeframe="daily"):
     """Calculate RSI for a given stock ticker and timeframe."""
