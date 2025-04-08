@@ -1,4 +1,5 @@
 import pandas as pd
+import pandas_ta as ta 
 import numpy as np
 import yfinance as yf
 import datetime
@@ -7,7 +8,6 @@ import requests
 import os
 from flask import Flask, render_template, jsonify
 import logging
-import talib as ta
 import threading
 
 # Setup logging
@@ -60,10 +60,12 @@ def get_stock_data(symbol, interval='5m', period='5d'):
         return None
 
 def calculate_rsi(data, window=14):
-    """Calculate RSI for the given data"""
+    """Calculate RSI for the given data using pandas-ta"""
     if len(data) < window + 1:
         return None
-    return ta.RSI(data['Close'].values, timeperiod=window)
+    # Calculate RSI using pandas-ta
+    data.ta.rsi(close='Close', length=window, append=True)
+    return data[f'RSI_{window}']  # The column name format used by pandas-ta
 
 def check_technical_conditions(symbol):
     """Check if the stock passes all technical conditions"""
