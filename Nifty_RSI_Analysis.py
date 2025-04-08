@@ -318,7 +318,8 @@ def home():
         {% endif %}
         
         <div class="disclaimer">
-            <p>Disclaimer: This information is for educational purposes only and should not be considered as financial advice. 
+            <p>wEBLINK : https://nifty50-trading-message-bot.onrender.com
+             Disclaimer: This information is for educational purposes only and should not be considered as financial advice. 
             Always do your own research before making investment decisions.</p>
         </div>
     </body>
