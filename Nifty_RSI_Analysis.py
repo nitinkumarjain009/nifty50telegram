@@ -17,7 +17,7 @@ logger = logging.getLogger(__name__)
 
 # Telegram configuration
 TELEGRAM_TOKEN = '8017759392:AAEwM-W-y83lLXTjlPl8sC_aBmizuIrFXnU'
-TELEGRAM_CHAT_ID = '711856868'
+TELEGRAM_CHAT_ID = '@Stockniftybot'
 
 # Flask app for web display
 app = Flask(__name__)
