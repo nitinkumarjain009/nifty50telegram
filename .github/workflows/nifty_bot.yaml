@@ -27,17 +27,34 @@ jobs:
             pip install requests pandas beautifulsoup4 pandas_ta twilio numpy
           fi
       
-      - name: Patch pandas_ta library
+      - name: Patch pandas_ta library with improved approach
         run: |
           echo "Patching pandas_ta squeeze_pro.py file to fix numpy NaN import..."
-          SQUEEZE_PRO_PATH=$(python -c "import os; import pandas_ta; print(os.path.join(os.path.dirname(pandas_ta.__file__), 'momentum/squeeze_pro.py'))")
-          echo "File path: $SQUEEZE_PRO_PATH"
-          if [ -f "$SQUEEZE_PRO_PATH" ]; then
-            sed -i 's/from numpy import NaN as npNaN/from numpy import nan as npNaN/' "$SQUEEZE_PRO_PATH"
-            echo "Patch applied successfully."
-          else
-            echo "Warning: Could not find the squeeze_pro.py file. Patching failed."
-          fi
+          python - <<EOF
+          import os
+          import pandas_ta
+          
+          squeeze_pro_path = os.path.join(os.path.dirname(pandas_ta.__file__), 'momentum/squeeze_pro.py')
+          print(f"File path: {squeeze_pro_path}")
+          
+          if os.path.exists(squeeze_pro_path):
+              # Read the content of the file
+              with open(squeeze_pro_path, 'r') as file:
+                  content = file.read()
+              
+              # Make the replacement
+              if 'from numpy import NaN as npNaN' in content:
+                  content = content.replace('from numpy import NaN as npNaN', 'from numpy import nan as npNaN')
+                  
+                  # Write the modified content back to the file
+                  with open(squeeze_pro_path, 'w') as file:
+                      file.write(content)
+                  print("Patch applied successfully.")
+              else:
+                  print("The target import statement was not found. File might be already patched or has changed.")
+          else:
+              print("Warning: Could not find the squeeze_pro.py file. Patching failed.")
+          EOF
       
       - name: Send startup notification
         run: |
