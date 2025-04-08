@@ -19,7 +19,7 @@ logger = logging.getLogger(__name__)
 TELEGRAM_BOT_TOKEN = os.environ.get("TELEGRAM_BOT_TOKEN")
 TELEGRAM_CHAT_ID = os.environ.get("TELEGRAM_CHAT_ID")
 REFRESH_INTERVAL = 15 * 60  # 15 minutes in seconds
-NIFTY500_CSV_PATH = "nifty500_symbols.csv"
+NIFTY500_CSV_PATH = "nifty50_stocks.csv"
 
 # Market hours in IST
 MARKET_OPEN_HOUR = 9  # 9:00 AM IST
