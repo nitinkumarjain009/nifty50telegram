@@ -55,14 +55,21 @@ def calculate_rsi(ticker_symbol, period=14, timeframe="daily"):
             logger.warning(f"Not enough {timeframe} data for {ticker_symbol}")
             return None, None
         
-        # Calculate RSI - pass the Series not the DataFrame
+        # Make sure we're working with a Series, not a DataFrame or ndarray
         close_series = data['Close']
+        if isinstance(close_series, pd.DataFrame):  # If it's still a DataFrame somehow
+            close_series = close_series.iloc[:, 0]  # Take the first column as a Series
+        elif isinstance(close_series.values, np.ndarray) and close_series.values.ndim > 1:
+            # If it's a Series with a multi-dimensional ndarray inside
+            close_series = pd.Series(close_series.values.flatten())
+            
+        # Calculate RSI with the properly formatted Series
         rsi_indicator = RSIIndicator(close=close_series, window=period)
-        data['RSI'] = rsi_indicator.rsi()
+        rsi_values = rsi_indicator.rsi()
         
         # Get the latest values
-        latest_rsi = data['RSI'].iloc[-1]
-        latest_price = data['Close'].iloc[-1]
+        latest_rsi = rsi_values.iloc[-1]
+        latest_price = close_series.iloc[-1]
         
         return latest_rsi, latest_price
     
