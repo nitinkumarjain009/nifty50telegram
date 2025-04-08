@@ -1,5 +1,4 @@
 import pandas as pd
-import pandas_ta as ta 
 import numpy as np
 import yfinance as yf
 import datetime
@@ -8,7 +7,9 @@ import requests
 import os
 from flask import Flask, render_template, jsonify
 import logging
+import pandas_ta as ta  # Using pandas-ta instead of TA-Lib
 import threading
+import pytz
 
 # Setup logging
 logging.basicConfig(level=logging.INFO, format='%(asctime)s - %(name)s - %(levelname)s - %(message)s')
@@ -20,6 +21,12 @@ TELEGRAM_CHAT_ID = os.environ.get("TELEGRAM_CHAT_ID")
 REFRESH_INTERVAL = 15 * 60  # 15 minutes in seconds
 NIFTY500_CSV_PATH = "nifty500_symbols.csv"
 
+# Market hours in IST
+MARKET_OPEN_HOUR = 9  # 9:00 AM IST
+MARKET_OPEN_MINUTE = 15  # 9:15 AM IST
+MARKET_CLOSE_HOUR = 15  # 3:00 PM IST
+MARKET_CLOSE_MINUTE = 30  # 3:30 PM IST
+
 # Initialize Flask app
 app = Flask(__name__, template_folder='templates')
 
@@ -27,8 +34,51 @@ app = Flask(__name__, template_folder='templates')
 results = {
     'last_update': None,
     'buy_recommendations': [],
-    'data_history': []  # To store historical recommendations
+    'data_history': [],  # To store historical recommendations
+    'market_status': 'Closed',  # Current market status
+    'next_update': None  # When the next scan will occur
 }
+
+def is_market_open():
+    """Check if the market is currently open based on IST timezone"""
+    now = datetime.datetime.now(pytz.timezone('Asia/Kolkata'))
+    
+    # Check if it's a weekday (0 = Monday, 6 = Sunday)
+    if now.weekday() >= 5:  # Saturday or Sunday
+        return False
+    
+    # Check if current time is within market hours
+    market_open = now.replace(hour=MARKET_OPEN_HOUR, minute=MARKET_OPEN_MINUTE, second=0, microsecond=0)
+    market_close = now.replace(hour=MARKET_CLOSE_HOUR, minute=MARKET_CLOSE_MINUTE, second=0, microsecond=0)
+    
+    return market_open <= now <= market_close
+
+def time_until_next_market_open():
+    """Calculate time in seconds until the next market opening"""
+    now = datetime.datetime.now(pytz.timezone('Asia/Kolkata'))
+    
+    # Start with today's date for the market open time
+    next_open = now.replace(hour=MARKET_OPEN_HOUR, minute=MARKET_OPEN_MINUTE, second=0, microsecond=0)
+    
+    # If we're past today's market open time, go to the next business day
+    if now >= next_open:
+        next_open = next_open + datetime.timedelta(days=1)
+    
+    # Skip to Monday if it's Friday after market hours or weekend
+    while next_open.weekday() >= 5:  # Saturday or Sunday
+        next_open = next_open + datetime.timedelta(days=1)
+    
+    # Calculate time difference in seconds
+    delta = next_open - now
+    return delta.total_seconds()
+
+def time_until_market_close():
+    """Calculate time in seconds until the market closes"""
+    now = datetime.datetime.now(pytz.timezone('Asia/Kolkata'))
+    market_close = now.replace(hour=MARKET_CLOSE_HOUR, minute=MARKET_CLOSE_MINUTE, second=0, microsecond=0)
+    
+    delta = market_close - now
+    return delta.total_seconds()
 
 def download_nifty500_list():
     """Download and save the list of NIFTY 500 stocks if not already available"""
@@ -138,7 +188,7 @@ def check_technical_conditions(symbol):
                 'day_low': df_1d['Low'].iloc[-1],
                 'rsi_5m': df_5m['RSI'].iloc[-1],
                 'rsi_30m': df_30m['RSI'].iloc[-1],
-                'timestamp': datetime.datetime.now().strftime('%Y-%m-%d %H:%M:%S')
+                'timestamp': datetime.datetime.now(pytz.timezone('Asia/Kolkata')).strftime('%Y-%m-%d %H:%M:%S')
             }
             return True, details
         
@@ -192,7 +242,7 @@ def format_telegram_message(recommendations):
         message += f"📈 RSI (30m): {rec['rsi_30m']:.2f}\n"
         message += f"❗ <b>BUY RECOMMENDATION</b>\n\n"
     
-    message += f"🕒 Updated at: {datetime.datetime.now().strftime('%Y-%m-%d %H:%M:%S')}"
+    message += f"🕒 Updated at: {datetime.datetime.now(pytz.timezone('Asia/Kolkata')).strftime('%Y-%m-%d %H:%M:%S')}"
     
     return message
 
@@ -214,7 +264,8 @@ def scan_stocks():
                 buy_recommendations.append(details)
         
         # Update results
-        results['last_update'] = datetime.datetime.now().strftime('%Y-%m-%d %H:%M:%S')
+        ist_now = datetime.datetime.now(pytz.timezone('Asia/Kolkata'))
+        results['last_update'] = ist_now.strftime('%Y-%m-%d %H:%M:%S')
         results['buy_recommendations'] = buy_recommendations
         
         # Store in history (keep last 10 scans)
@@ -225,9 +276,25 @@ def scan_stocks():
         })
         results['data_history'] = results['data_history'][-10:]
         
-        # Send Telegram notification
-        if buy_recommendations:
+        # Update market status
+        if is_market_open():
+            results['market_status'] = 'Open'
+            next_scan_time = ist_now + datetime.timedelta(seconds=REFRESH_INTERVAL)
+        else:
+            results['market_status'] = 'Closed'
+            seconds_to_open = time_until_next_market_open()
+            next_scan_time = ist_now + datetime.timedelta(seconds=seconds_to_open)
+        
+        results['next_update'] = next_scan_time.strftime('%Y-%m-%d %H:%M:%S')
+        
+        # Send Telegram notification only if market is open or it's the after-hours summary
+        if buy_recommendations and (is_market_open() or 
+                                   (ist_now.hour == MARKET_CLOSE_HOUR and 
+                                    ist_now.minute >= MARKET_CLOSE_MINUTE and 
+                                    ist_now.minute < MARKET_CLOSE_MINUTE + 15)):
             message = format_telegram_message(buy_recommendations)
+            if not is_market_open():
+                message = "📈 <b>END OF DAY SUMMARY</b> 📉\n\n" + message
             send_telegram_message(message)
             logger.info(f"Found {len(buy_recommendations)} stocks matching criteria")
         else:
@@ -240,12 +307,39 @@ def scan_stocks():
         return []
 
 def periodic_scan():
-    """Function to run the scan periodically"""
+    """Function to run the scan periodically based on market hours"""
     while True:
         try:
+            # Run the scan
             scan_stocks()
-            logger.info(f"Sleeping for {REFRESH_INTERVAL/60} minutes before next scan")
-            time.sleep(REFRESH_INTERVAL)
+            
+            # Determine when to run the next scan
+            if is_market_open():
+                # During market hours, scan every REFRESH_INTERVAL
+                logger.info(f"Market is open. Next scan in {REFRESH_INTERVAL/60} minutes")
+                time.sleep(REFRESH_INTERVAL)
+            else:
+                # If market just closed, do one final scan
+                ist_now = datetime.datetime.now(pytz.timezone('Asia/Kolkata'))
+                if (ist_now.hour == MARKET_CLOSE_HOUR and 
+                    ist_now.minute >= MARKET_CLOSE_MINUTE and 
+                    ist_now.minute < MARKET_CLOSE_MINUTE + 15):
+                    logger.info("Market just closed. Running final scan for the day")
+                    time.sleep(60)  # Wait a minute before final scan
+                    scan_stocks()
+                
+                # Calculate time until next market open
+                seconds_to_open = time_until_next_market_open()
+                hours_to_open = seconds_to_open / 3600
+                
+                logger.info(f"Market is closed. Next scan in {hours_to_open:.2f} hours")
+                
+                # Sleep until 5 minutes before market opens
+                if seconds_to_open > 300:  # More than 5 minutes
+                    time.sleep(seconds_to_open - 300)
+                else:
+                    time.sleep(60)  # Just wait a minute and check again
+        
         except Exception as e:
             logger.error(f"Error in periodic scan: {e}")
             time.sleep(60)  # Wait a minute and try again
@@ -284,6 +378,8 @@ def create_templates():
         .buy-badge { background-color: #28a745; }
         .header-section { background-color: #f8f9fa; padding: 20px 0; margin-bottom: 30px; }
         .chart-container { height: 300px; margin-top: 30px; }
+        .market-open { color: #28a745; font-weight: bold; }
+        .market-closed { color: #dc3545; font-weight: bold; }
     </style>
 </head>
 <body>
@@ -291,7 +387,17 @@ def create_templates():
         <div class="header-section text-center">
             <h1 class="display-4">NIFTY 500 Technical Scanner</h1>
             <p class="lead">Real-time technical analysis and buy recommendations</p>
-            <p id="last-update" class="text-muted">Last update: Loading...</p>
+            <div class="row justify-content-center">
+                <div class="col-md-6">
+                    <div class="card mb-3">
+                        <div class="card-body">
+                            <p>Market Status: <span id="market-status" class="market-closed">Loading...</span></p>
+                            <p id="last-update" class="mb-0">Last update: Loading...</p>
+                            <p id="next-update" class="mb-0">Next update: Calculating...</p>
+                        </div>
+                    </div>
+                </div>
+            </div>
             <div class="d-flex justify-content-center">
                 <div class="spinner-border text-primary" id="loading-indicator" role="status">
                     <span class="visually-hidden">Loading...</span>
@@ -352,7 +458,7 @@ def create_templates():
         </div>
 
         <footer class="mt-5 mb-3 text-center text-muted">
-            <p>&copy; 2025 NIFTY Technical Analyzer | Data refreshes every 15 minutes</p>
+            <p>&copy; 2025 NIFTY Technical Analyzer | Data refreshes every 15 minutes during market hours (9:15 AM - 3:30 PM IST)</p>
         </footer>
     </div>
 
@@ -360,6 +466,45 @@ def create_templates():
     <script src="https://cdn.jsdelivr.net/npm/chart.js"></script>
     <script>
         let historyChart = null;
+        let countdownInterval = null;
+
+        // Function to format remaining time
+        function formatCountdown(targetTimeStr) {
+            const now = new Date();
+            const target = new Date(targetTimeStr);
+            
+            // Calculate difference in seconds
+            let diff = Math.floor((target - now) / 1000);
+            
+            if (diff <= 0) return "Any moment now...";
+            
+            const hours = Math.floor(diff / 3600);
+            diff -= hours * 3600;
+            const minutes = Math.floor(diff / 60);
+            const seconds = diff - minutes * 60;
+            
+            let result = "";
+            if (hours > 0) result += `${hours}h `;
+            if (minutes > 0 || hours > 0) result += `${minutes}m `;
+            result += `${seconds}s`;
+            
+            return result;
+        }
+
+        // Update countdown timer
+        function updateCountdown(nextUpdateTime) {
+            if (countdownInterval) {
+                clearInterval(countdownInterval);
+            }
+            
+            function update() {
+                const countdownStr = formatCountdown(nextUpdateTime);
+                document.getElementById('next-update').textContent = `Next update: ${countdownStr}`;
+            }
+            
+            update(); // Initial update
+            countdownInterval = setInterval(update, 1000);
+        }
 
         // Function to fetch data and update UI
         function fetchAndUpdateData() {
@@ -372,6 +517,20 @@ def create_templates():
                     
                     // Update last update time
                     document.getElementById('last-update').textContent = `Last update: ${data.last_update || 'Not yet updated'}`;
+                    
+                    // Update market status
+                    const marketStatusElement = document.getElementById('market-status');
+                    marketStatusElement.textContent = data.market_status;
+                    if (data.market_status === 'Open') {
+                        marketStatusElement.className = 'market-open';
+                    } else {
+                        marketStatusElement.className = 'market-closed';
+                    }
+                    
+                    // Update next update countdown
+                    if (data.next_update) {
+                        updateCountdown(data.next_update);
+                    }
                     
                     // Clear existing cards
                     const container = document.getElementById('recommendations-container');
@@ -475,7 +634,7 @@ def create_templates():
         // Initial fetch
         fetchAndUpdateData();
         
-        // Refresh every minute to show countdown
+        // Refresh every minute to show countdown and changes
         setInterval(fetchAndUpdateData, 60000);
     </script>
 </body>
