@@ -1,239 +1,168 @@
 import pandas as pd
 import numpy as np
 import yfinance as yf
+import datetime
+import time
 import requests
-from ta.momentum import RSIIndicator
-from ta.volatility import AverageTrueRange
-import pytz
-from datetime import datetime, time, timedelta
-import logging
-from apscheduler.schedulers.blocking import BlockingScheduler
 import os
-from flask import Flask, render_template_string
+from flask import Flask, render_template, jsonify
+import logging
+import talib as ta
 import threading
 
-# Configure logging
-logging.basicConfig(level=logging.INFO, format='%(asctime)s - %(levelname)s - %(message)s')
+# Setup logging
+logging.basicConfig(level=logging.INFO, format='%(asctime)s - %(name)s - %(levelname)s - %(message)s')
 logger = logging.getLogger(__name__)
 
-# Telegram configuration
-TELEGRAM_TOKEN = '8017759392:AAEwM-W-y83lLXTjlPl8sC_aBmizuIrFXnU'
-TELEGRAM_CHAT_ID = '@Stockniftybot'
-
-# Flask app for web display
-app = Flask(__name__)
-oversold_stocks = []
-overbought_stocks = []
-chandelier_signals = []
-
 # Configuration
-NIFTY_INDEX = "^NSEI"  # Nifty 50 index
-NIFTY_STOCKS_FILE = "nifty50_stocks.csv"  # CSV with stock symbols
-RSI_PERIOD = 14
-OVERSOLD_THRESHOLD = 30
-OVERBOUGHT_THRESHOLD = 60
+TELEGRAM_BOT_TOKEN = os.environ.get("TELEGRAM_BOT_TOKEN")
+TELEGRAM_CHAT_ID = os.environ.get("TELEGRAM_CHAT_ID")
+REFRESH_INTERVAL = 15 * 60  # 15 minutes in seconds
+NIFTY500_CSV_PATH = "nifty500_symbols.csv"
 
-# Chandelier Exit configuration - updated based on Pine Script
-ATR_PERIOD = 1  # Changed from 22 to 1 as per Pine Script
-CHANDELIER_MULTIPLIER = 2.0  # Changed from 3 to 2.0 as per Pine Script
+# Initialize Flask app
+app = Flask(__name__, template_folder='templates')
 
-def calculate_rsi(ticker_symbol, period=14, timeframe="daily"):
-    """Calculate RSI for a given stock ticker and timeframe."""
+# Store results that will be displayed on the web page
+results = {
+    'last_update': None,
+    'buy_recommendations': [],
+    'data_history': []  # To store historical recommendations
+}
+
+def download_nifty500_list():
+    """Download and save the list of NIFTY 500 stocks if not already available"""
+    if not os.path.exists(NIFTY500_CSV_PATH):
+        logger.info("Downloading NIFTY 500 stock list...")
+        # In a real scenario, you'd download this from NSE or use a data provider
+        # For demonstration, creating a sample list
+        df = pd.DataFrame({
+            'Symbol': ['RELIANCE.NS', 'TCS.NS', 'HDFCBANK.NS', 'INFY.NS', 'ICICIBANK.NS'],
+            'Company': ['Reliance Industries', 'Tata Consultancy Services', 'HDFC Bank', 'Infosys', 'ICICI Bank']
+        })
+        df.to_csv(NIFTY500_CSV_PATH, index=False)
+        logger.info(f"Created sample NIFTY 500 list with {len(df)} stocks")
+    else:
+        logger.info(f"Using existing NIFTY 500 list from {NIFTY500_CSV_PATH}")
+
+def get_stock_data(symbol, interval='5m', period='5d'):
+    """Get stock data for the given symbol using yfinance"""
     try:
-        # Set interval and period based on timeframe
-        if timeframe == "daily":
-            interval = "1d"
-            hist_period = "30d"
-        elif timeframe == "weekly":
-            interval = "1wk"
-            hist_period = "200d"  # Need more historical data for weekly
-        elif timeframe == "monthly":
-            interval = "1mo"
-            hist_period = "600d"  # Need more historical data for monthly
-        else:
-            logger.error(f"Invalid timeframe: {timeframe}")
-            return None, None
+        logger.info(f"Fetching data for {symbol}")
+        stock = yf.Ticker(symbol)
+        df = stock.history(period=period, interval=interval)
+        if df.empty:
+            logger.warning(f"No data available for {symbol}")
+            return None
+        return df
+    except Exception as e:
+        logger.error(f"Error fetching data for {symbol}: {e}")
+        return None
+
+def calculate_rsi(data, window=14):
+    """Calculate RSI for the given data"""
+    if len(data) < window + 1:
+        return None
+    return ta.RSI(data['Close'].values, timeperiod=window)
+
+def check_technical_conditions(symbol):
+    """Check if the stock passes all technical conditions"""
+    try:
+        # Get 5-minute data
+        df_5m = get_stock_data(symbol, interval='5m', period='5d')
+        if df_5m is None or len(df_5m) < 5:
+            return False, "Insufficient 5-minute data"
         
-        # Get data
-        data = yf.download(ticker_symbol, period=hist_period, interval=interval, progress=False)
+        # Get 30-minute data
+        df_30m = get_stock_data(symbol, interval='30m', period='5d')
+        if df_30m is None or len(df_30m) < 3:
+            return False, "Insufficient 30-minute data"
         
-        if data.empty or len(data) < period + 1:
-            logger.warning(f"Not enough {timeframe} data for {ticker_symbol}")
-            return None, None
+        # Get daily data
+        df_1d = get_stock_data(symbol, interval='1d', period='5d')
+        if df_1d is None or len(df_1d) < 2:
+            return False, "Insufficient daily data"
         
-        # Make sure we're working with a Series, not a DataFrame or ndarray
-        close_series = data['Close']
-        if isinstance(close_series, pd.DataFrame):  # If it's still a DataFrame somehow
-            close_series = close_series.iloc[:, 0]  # Take the first column as a Series
-        elif isinstance(close_series.values, np.ndarray) and close_series.values.ndim > 1:
-            # If it's a Series with a multi-dimensional ndarray inside
-            close_series = pd.Series(close_series.values.flatten())
-            
-        # Calculate RSI with the properly formatted Series
-        rsi_indicator = RSIIndicator(close=close_series, window=period)
-        rsi_values = rsi_indicator.rsi()
+        # Calculate RSI for 5-minute data
+        df_5m['RSI'] = calculate_rsi(df_5m)
         
-        # Get the latest values
-        latest_rsi = rsi_values.iloc[-1]
-        latest_price = close_series.iloc[-1]
+        # Calculate RSI for 30-minute data
+        df_30m['RSI'] = calculate_rsi(df_30m)
         
-        return latest_rsi, latest_price
+        # Check conditions:
+        # [=2] 5 minute close > [=1] 5 minute low
+        cond1 = df_5m['Close'].iloc[-2] > df_5m['Low'].iloc[-1]
+        
+        # [=3] 5 minute close > [=1] 5 minute low
+        cond2 = df_5m['Close'].iloc[-3] > df_5m['Low'].iloc[-1]
+        
+        # [=4] 5 minute close > [=1] 5 minute low
+        cond3 = df_5m['Close'].iloc[-4] > df_5m['Low'].iloc[-1]
+        
+        # [=2] 5 minute close < [=1] 5 minute high
+        cond4 = df_5m['Close'].iloc[-2] < df_5m['High'].iloc[-1]
+        
+        # [=3] 5 minute close < [=1] 5 minute high
+        cond5 = df_5m['Close'].iloc[-3] < df_5m['High'].iloc[-1]
+        
+        # [=4] 5 minute close < [=1] 5 minute high
+        cond6 = df_5m['Close'].iloc[-4] < df_5m['High'].iloc[-1]
+        
+        # [=1] 5 minute RSI(14) > 60
+        cond7 = df_5m['RSI'].iloc[-1] > 60
+        
+        # [ =-1 ] 5 minute RSI(14) <= 60
+        cond8 = df_5m['RSI'].iloc[-2] <= 60
+        
+        # [=1] 30 minute RSI(14) > 60
+        cond9 = df_30m['RSI'].iloc[-1] > 60
+        
+        # [=1] 5 minute close > 1 day ago high
+        cond10 = df_5m['Close'].iloc[-1] > df_1d['High'].iloc[-2]
+        
+        # [=1] 5 minute open > 1 day ago high
+        cond11 = df_5m['Open'].iloc[-1] > df_1d['High'].iloc[-2]
+        
+        all_conditions = [cond1, cond2, cond3, cond4, cond5, cond6, cond7, cond8, cond9, cond10, cond11]
+        conditions_met = all(all_conditions)
+        
+        if conditions_met:
+            details = {
+                'symbol': symbol,
+                'company': get_company_name(symbol),
+                'current_price': df_5m['Close'].iloc[-1],
+                'previous_close': df_5m['Close'].iloc[-2],
+                'day_high': df_1d['High'].iloc[-1],
+                'day_low': df_1d['Low'].iloc[-1],
+                'rsi_5m': df_5m['RSI'].iloc[-1],
+                'rsi_30m': df_30m['RSI'].iloc[-1],
+                'timestamp': datetime.datetime.now().strftime('%Y-%m-%d %H:%M:%S')
+            }
+            return True, details
+        
+        return False, "Not all conditions met"
     
     except Exception as e:
-        logger.error(f"Error calculating {timeframe} RSI for {ticker_symbol}: {e}")
-        return None, None
+        logger.error(f"Error checking conditions for {symbol}: {e}")
+        return False, f"Error: {str(e)}"
 
-def calculate_chandelier_exit(ticker_symbol, atr_period=1, multiplier=2.0):
-    """Calculate Chandelier Entry/Exit for a given stock ticker using the updated strategy from Pine Script."""
+def get_company_name(symbol):
+    """Get company name from the CSV file"""
     try:
-        # Get data for the past 60 days to have enough history
-        data = yf.download(ticker_symbol, period="60d", interval="1d", progress=False)
-        
-        if data.empty or len(data) < atr_period + 1:
-            logger.warning(f"Not enough data for chandelier exit on {ticker_symbol}")
-            return None, None, None
-        
-        # Calculate ATR
-        atr_indicator = AverageTrueRange(high=data['High'], low=data['Low'], close=data['Close'], window=atr_period)
-        atr = atr_indicator.average_true_range()
-        
-        # Calculate highest high for long exit
-        data['highest_high'] = data['High'].rolling(window=atr_period).max()
-        
-        # Calculate lowest low for short exit
-        data['lowest_low'] = data['Low'].rolling(window=atr_period).min()
-        
-        # Calculate Chandelier Exit Long (for exit long and enter short signals)
-        data['chandelier_long'] = data['highest_high'] - (multiplier * atr)
-        
-        # Calculate Chandelier Exit Short (for exit short and enter long signals)
-        data['chandelier_short'] = data['lowest_low'] + (multiplier * atr)
-        
-        # Determine signal based on Pine Script logic (crossover/crossunder)
-        current_close = data['Close'].iloc[-1]
-        previous_close = data['Close'].iloc[-2]
-        chandelier_long = data['chandelier_long'].iloc[-1]
-        chandelier_short = data['chandelier_short'].iloc[-1]
-        previous_chandelier_long = data['chandelier_long'].iloc[-2]
-        previous_chandelier_short = data['chandelier_short'].iloc[-2]
-        
-        # Buy signal: Price crosses above the Chandelier Long Exit
-        buy_signal = previous_close <= previous_chandelier_long and current_close > chandelier_long
-        
-        # Sell signal: Price crosses below the Chandelier Short Exit
-        sell_signal = previous_close >= previous_chandelier_short and current_close < chandelier_short
-        
-        signal = None
-        if buy_signal:
-            signal = "BUY"
-        elif sell_signal:
-            signal = "SELL"
-        
-        return signal, round(chandelier_long, 2), round(chandelier_short, 2)
-    
-    except Exception as e:
-        logger.error(f"Error calculating Chandelier Exit for {ticker_symbol}: {e}")
-        return None, None, None
-
-def get_nifty_stocks():
-    """Get the list of Nifty stocks from CSV file."""
-    try:
-        if os.path.exists(NIFTY_STOCKS_FILE):
-            df = pd.read_csv(NIFTY_STOCKS_FILE)
-            # Check for the Symbol column or fallback to first column
-            if 'Symbol' in df.columns:
-                stock_list = df['Symbol'].tolist()
-            else:
-                # Assume the first column contains symbols
-                stock_list = df.iloc[:, 0].tolist()
-                
-            logger.info(f"Loaded {len(stock_list)} stocks from {NIFTY_STOCKS_FILE}")
-            return stock_list
-        else:
-            # Fallback to a sample of Nifty 50 stocks
-            logger.warning(f"{NIFTY_STOCKS_FILE} not found. Using sample stock list.")
-            return ["RELIANCE.NS", "TCS.NS", "HDFCBANK.NS", "INFY.NS", "ICICIBANK.NS", 
-                    "HDFC.NS", "ITC.NS", "KOTAKBANK.NS", "LT.NS", "HINDUNILVR.NS"]
-    except Exception as e:
-        logger.error(f"Error loading stock list from CSV: {e}")
-        return []
-
-def analyze_stocks():
-    """Analyze stocks for RSI conditions and Chandelier Exit signals."""
-    stocks = get_nifty_stocks()
-    daily_oversold = []
-    weekly_overbought = []
-    monthly_overbought = []
-    chandelier_signals_list = []
-    
-    for stock in stocks:
-        # Ensure proper Yahoo Finance ticker format
-        if not stock.endswith(".NS") and not stock.endswith(".BO"):
-            stock_symbol = f"{stock}.NS"
-        else:
-            stock_symbol = stock
-            
-        stock_name = stock.replace(".NS", "").replace(".BO", "")
-        
-        # Calculate RSI for different timeframes
-        daily_rsi, daily_price = calculate_rsi(stock_symbol, RSI_PERIOD, "daily")
-        weekly_rsi, weekly_price = calculate_rsi(stock_symbol, RSI_PERIOD, "weekly")
-        monthly_rsi, monthly_price = calculate_rsi(stock_symbol, RSI_PERIOD, "monthly")
-        
-        # Check daily oversold condition
-        if daily_rsi is not None and daily_rsi < OVERSOLD_THRESHOLD:
-            daily_oversold.append({
-                "symbol": stock_name,
-                "rsi": round(daily_rsi, 2),
-                "price": round(daily_price, 2),
-                "timeframe": "daily"
-            })
-            logger.info(f"Found daily oversold stock: {stock_name} with RSI: {daily_rsi:.2f}")
-        
-        # Check weekly overbought condition
-        if weekly_rsi is not None and weekly_rsi > OVERBOUGHT_THRESHOLD:
-            weekly_overbought.append({
-                "symbol": stock_name,
-                "rsi": round(weekly_rsi, 2),
-                "price": round(weekly_price, 2),
-                "timeframe": "weekly"
-            })
-            logger.info(f"Found weekly overbought stock: {stock_name} with RSI: {weekly_rsi:.2f}")
-            
-        # Check monthly overbought condition
-        if monthly_rsi is not None and monthly_rsi > OVERBOUGHT_THRESHOLD:
-            monthly_overbought.append({
-                "symbol": stock_name,
-                "rsi": round(monthly_rsi, 2),
-                "price": round(monthly_price, 2),
-                "timeframe": "monthly"
-            })
-            logger.info(f"Found monthly overbought stock: {stock_name} with RSI: {monthly_rsi:.2f}")
-        
-        # Calculate Chandelier Entry/Exit signals with updated parameters
-        signal, long_exit, short_exit = calculate_chandelier_exit(stock_symbol, ATR_PERIOD, CHANDELIER_MULTIPLIER)
-        
-        if signal:
-            # Get price data for the signal
-            data = yf.download(stock_symbol, period="1d", interval="1d", progress=False)
-            current_price = round(data['Close'].iloc[-1], 2)
-            
-            chandelier_signals_list.append({
-                "symbol": stock_name,
-                "signal": signal,
-                "price": current_price,
-                "long_exit": long_exit,
-                "short_exit": short_exit,
-                "daily_rsi": round(daily_rsi, 2) if daily_rsi is not None else None
-            })
-            logger.info(f"Found {signal} signal for {stock_name} at price: {current_price}")
-    
-    return daily_oversold, weekly_overbought + monthly_overbought, chandelier_signals_list
+        df = pd.read_csv(NIFTY500_CSV_PATH)
+        company = df[df['Symbol'] == symbol]['Company'].iloc[0]
+        return company
+    except:
+        return symbol
 
 def send_telegram_message(message):
-    """Send message to Telegram channel."""
+    """Send a message to Telegram"""
+    if not TELEGRAM_BOT_TOKEN or not TELEGRAM_CHAT_ID:
+        logger.warning("Telegram credentials not set. Message not sent.")
+        return
+    
     try:
-        url = f"https://api.telegram.org/bot{TELEGRAM_TOKEN}/sendMessage"
+        url = f"https://api.telegram.org/bot{TELEGRAM_BOT_TOKEN}/sendMessage"
         payload = {
             "chat_id": TELEGRAM_CHAT_ID,
             "text": message,
@@ -247,394 +176,331 @@ def send_telegram_message(message):
     except Exception as e:
         logger.error(f"Error sending Telegram message: {e}")
 
-def format_message(oversold_stocks, overbought_stocks, chandelier_signals):
-    """Format the analysis results as a Telegram message."""
-    current_date = datetime.now(pytz.timezone('Asia/Kolkata')).strftime("%d-%b-%Y %H:%M:%S")
-    message = f"<b>🔍 Nifty Technical Analysis ({current_date})</b>\n\n"
+def format_telegram_message(recommendations):
+    """Format recommendations for Telegram message"""
+    if not recommendations:
+        return "📊 No stocks matching the criteria at this time."
     
-    # Format Chandelier Exit signals (prioritize these)
-    if chandelier_signals:
-        message += "<b>🔔 Chandelier Entry/Exit Signals:</b>\n\n"
-        for stock in chandelier_signals:
-            signal_emoji = "🟢" if stock['signal'] == "BUY" else "🔴"
-            rsi_info = f" | RSI = {stock['daily_rsi']}" if stock['daily_rsi'] is not None else ""
-            message += f"{signal_emoji} <b>{stock['symbol']}</b>: {stock['signal']} @ ₹{stock['price']}{rsi_info}\n"
-        message += "\n"
+    message = "🚀 <b>NIFTY 500 Technical Buy Recommendations</b> 🚀\n\n"
     
-    # Format oversold stocks
-    if oversold_stocks:
-        message += "<b>📉 Stocks with Daily RSI below 30 (Potentially Oversold):</b>\n\n"
-        for stock in oversold_stocks:
-            message += f"• <b>{stock['symbol']}</b>: RSI = {stock['rsi']} | Price = ₹{stock['price']}\n"
-        message += "\n"
+    for rec in recommendations:
+        message += f"<b>{rec['symbol']} ({rec['company']})</b>\n"
+        message += f"💰 Price: ₹{rec['current_price']:.2f}\n"
+        message += f"📈 RSI (5m): {rec['rsi_5m']:.2f}\n"
+        message += f"📈 RSI (30m): {rec['rsi_30m']:.2f}\n"
+        message += f"❗ <b>BUY RECOMMENDATION</b>\n\n"
     
-    # Format overbought stocks
-    if overbought_stocks:
-        message += "<b>📈 Stocks with Weekly/Monthly RSI above 60 (Potentially Overbought):</b>\n\n"
-        for stock in overbought_stocks:
-            message += f"• <b>{stock['symbol']}</b> ({stock['timeframe']}): RSI = {stock['rsi']} | Price = ₹{stock['price']}\n"
+    message += f"🕒 Updated at: {datetime.datetime.now().strftime('%Y-%m-%d %H:%M:%S')}"
     
-    # If no signals found
-    if not oversold_stocks and not overbought_stocks and not chandelier_signals:
-        message += "No significant technical signals found in this scan."
-    
-    message += "\n<i>Technical indicators should be used alongside other analysis methods. Trade with proper risk management.</i>"
     return message
 
+def scan_stocks():
+    """Main function to scan stocks based on technical criteria"""
+    try:
+        logger.info("Starting stock scan...")
+        
+        # Read NIFTY 500 stock list
+        df = pd.read_csv(NIFTY500_CSV_PATH)
+        symbols = df['Symbol'].tolist()
+        
+        buy_recommendations = []
+        
+        for symbol in symbols:
+            passes, details = check_technical_conditions(symbol)
+            if passes:
+                logger.info(f"🔔 BUY signal for {symbol}")
+                buy_recommendations.append(details)
+        
+        # Update results
+        results['last_update'] = datetime.datetime.now().strftime('%Y-%m-%d %H:%M:%S')
+        results['buy_recommendations'] = buy_recommendations
+        
+        # Store in history (keep last 10 scans)
+        results['data_history'].append({
+            'timestamp': results['last_update'],
+            'recommendations': len(buy_recommendations),
+            'symbols': [rec['symbol'] for rec in buy_recommendations]
+        })
+        results['data_history'] = results['data_history'][-10:]
+        
+        # Send Telegram notification
+        if buy_recommendations:
+            message = format_telegram_message(buy_recommendations)
+            send_telegram_message(message)
+            logger.info(f"Found {len(buy_recommendations)} stocks matching criteria")
+        else:
+            logger.info("No stocks match the criteria in this scan")
+        
+        return buy_recommendations
+    
+    except Exception as e:
+        logger.error(f"Error in scan_stocks: {e}")
+        return []
+
+def periodic_scan():
+    """Function to run the scan periodically"""
+    while True:
+        try:
+            scan_stocks()
+            logger.info(f"Sleeping for {REFRESH_INTERVAL/60} minutes before next scan")
+            time.sleep(REFRESH_INTERVAL)
+        except Exception as e:
+            logger.error(f"Error in periodic scan: {e}")
+            time.sleep(60)  # Wait a minute and try again
+
+# Flask routes
 @app.route('/')
-def home():
-    """Render the web page with analysis results."""
-    current_date = datetime.now(pytz.timezone('Asia/Kolkata')).strftime("%d-%b-%Y %H:%M:%S")
-    is_market_open = is_market_hours()
+def index():
+    """Render the main page"""
+    return render_template('index.html')
+
+@app.route('/api/data')
+def get_data():
+    """API endpoint to get current recommendations"""
+    return jsonify(results)
+
+# Create HTML template directory and files
+def create_templates():
+    """Create templates directory and HTML files"""
+    if not os.path.exists('templates'):
+        os.makedirs('templates')
     
-    html_template = '''
-    <!DOCTYPE html>
-    <html>
-    <head>
-        <title>Nifty Technical Analysis</title>
-        <meta http-equiv="refresh" content="600"> <!-- Refresh every 10 minutes -->
-        <meta name="viewport" content="width=device-width, initial-scale=1.0">
-        <style>
-            body {
-                font-family: Arial, sans-serif;
-                margin: 0;
-                padding: 20px;
-                line-height: 1.6;
-                color: #333;
-                max-width: 1000px;
-                margin: 0 auto;
-                background-color: #f5f5f5;
-            }
-            .header {
-                text-align: center;
-                margin-bottom: 20px;
-                background-color: #2c3e50;
-                color: white;
-                padding: 20px;
-                border-radius: 5px;
-            }
-            .market-status {
-                display: flex;
-                justify-content: center;
-                align-items: center;
-                margin-bottom: 20px;
-            }
-            .status-indicator {
-                width: 12px;
-                height: 12px;
-                border-radius: 50%;
-                margin-right: 8px;
-            }
-            .open {
-                background-color: #2ecc71;
-            }
-            .closed {
-                background-color: #e74c3c;
-            }
-            .section {
-                background-color: white;
-                border-radius: 5px;
-                padding: 20px;
-                margin-bottom: 20px;
-                box-shadow: 0 2px 4px rgba(0,0,0,0.1);
-            }
-            h1 {
-                color: white;
-                margin: 0;
-            }
-            h2 {
-                color: #2c3e50;
-                margin-top: 0;
-                border-bottom: 2px solid #3498db;
-                padding-bottom: 10px;
-            }
-            .stock-card {
-                background-color: #f9f9f9;
-                border-radius: 5px;
-                padding: 15px;
-                margin-bottom: 10px;
-                box-shadow: 0 2px 4px rgba(0,0,0,0.1);
-            }
-            .oversold {
-                border-left: 4px solid #e74c3c;
-            }
-            .overbought {
-                border-left: 4px solid #2ecc71;
-            }
-            .buy-signal {
-                border-left: 4px solid #27ae60;
-                background-color: #eafaf1;
-            }
-            .sell-signal {
-                border-left: 4px solid #c0392b;
-                background-color: #fdedec;
-            }
-            .stock-symbol {
-                font-weight: bold;
-                font-size: 18px;
-                color: #2980b9;
-            }
-            .signal-badge {
-                display: inline-block;
-                padding: 3px 8px;
-                border-radius: 3px;
-                color: white;
-                font-weight: bold;
-                margin-left: 10px;
-            }
-            .buy {
-                background-color: #27ae60;
-            }
-            .sell {
-                background-color: #c0392b;
-            }
-            .timeframe {
-                color: #7f8c8d;
-                font-size: 14px;
-                margin-left: 10px;
-            }
-            .stock-details {
-                display: flex;
-                flex-wrap: wrap;
-                justify-content: space-between;
-                margin-top: 10px;
-            }
-            .detail-item {
-                flex: 1;
-                min-width: 150px;
-                margin: 5px;
-            }
-            .disclaimer {
-                margin-top: 30px;
-                font-style: italic;
-                color: #7f8c8d;
-                border-top: 1px solid #eee;
-                padding-top: 15px;
-            }
-            .last-updated {
-                text-align: right;
-                font-size: 14px;
-                color: #95a5a6;
-            }
-            .no-stocks {
-                padding: 20px;
-                background-color: #f8f9fa;
-                text-align: center;
-                border-radius: 5px;
-            }
-            .grid-container {
-                display: grid;
-                grid-template-columns: repeat(auto-fill, minmax(300px, 1fr));
-                gap: 15px;
-            }
-            @media (max-width: 600px) {
-                body {
-                    padding: 10px;
-                }
-                .grid-container {
-                    grid-template-columns: 1fr;
-                }
-                .stock-details {
-                    flex-direction: column;
-                }
-                .detail-item {
-                    margin: 3px 0;
-                }
-            }
-        </style>
-    </head>
-    <body>
-        <div class="header">
-            <h1>Nifty Stocks Technical Analysis</h1>
-            <p class="last-updated">Last updated: {{ date }}</p>
+    # Create index.html
+    with open('templates/index.html', 'w') as f:
+        f.write("""
+<!DOCTYPE html>
+<html lang="en">
+<head>
+    <meta charset="UTF-8">
+    <meta name="viewport" content="width=device-width, initial-scale=1.0">
+    <title>NIFTY 500 Technical Scanner</title>
+    <link href="https://cdn.jsdelivr.net/npm/bootstrap@5.3.0-alpha1/dist/css/bootstrap.min.css" rel="stylesheet">
+    <style>
+        body { padding-top: 20px; }
+        .stock-card { margin-bottom: 20px; transition: all 0.3s; }
+        .stock-card:hover { transform: translateY(-5px); box-shadow: 0 10px 20px rgba(0,0,0,0.1); }
+        .buy-badge { background-color: #28a745; }
+        .header-section { background-color: #f8f9fa; padding: 20px 0; margin-bottom: 30px; }
+        .chart-container { height: 300px; margin-top: 30px; }
+    </style>
+</head>
+<body>
+    <div class="container">
+        <div class="header-section text-center">
+            <h1 class="display-4">NIFTY 500 Technical Scanner</h1>
+            <p class="lead">Real-time technical analysis and buy recommendations</p>
+            <p id="last-update" class="text-muted">Last update: Loading...</p>
+            <div class="d-flex justify-content-center">
+                <div class="spinner-border text-primary" id="loading-indicator" role="status">
+                    <span class="visually-hidden">Loading...</span>
+                </div>
+            </div>
         </div>
-        
-        <div class="market-status">
-            <div class="status-indicator {{ 'open' if market_open else 'closed' }}"></div>
-            <p>Market is currently <strong>{{ 'OPEN' if market_open else 'CLOSED' }}</strong></p>
+
+        <div class="row">
+            <div class="col-md-12">
+                <div class="alert alert-info" id="no-stocks" style="display:none;">
+                    No stocks currently match all the technical criteria. Check back soon!
+                </div>
+            </div>
         </div>
-        
-        <!-- Chandelier Exit Signals Section -->
-        <div class="section">
-            <h2>🔔 Chandelier Entry/Exit Signals</h2>
-            {% if chandelier %}
-                <div class="grid-container">
-                    {% for stock in chandelier %}
-                        <div class="stock-card {{ 'buy-signal' if stock.signal == 'BUY' else 'sell-signal' }}">
-                            <div class="stock-symbol">{{ stock.symbol }}
-                                <span class="signal-badge {{ 'buy' if stock.signal == 'BUY' else 'sell' }}">{{ stock.signal }}</span>
-                            </div>
-                            <div class="stock-details">
-                                <div class="detail-item">
-                                    <span>Price: <strong>₹{{ stock.price }}</strong></span>
-                                </div>
-                                {% if stock.daily_rsi %}
-                                <div class="detail-item">
-                                    <span>RSI: <strong>{{ stock.daily_rsi }}</strong></span>
-                                </div>
-                                {% endif %}
-                                <div class="detail-item">
-                                    <span>Long Exit: <strong>₹{{ stock.long_exit }}</strong></span>
-                                </div>
-                                <div class="detail-item">
-                                    <span>Short Exit: <strong>₹{{ stock.short_exit }}</strong></span>
-                                </div>
-                            </div>
+
+        <div class="row" id="recommendations-container">
+            <!-- Stock cards will be inserted here -->
+        </div>
+
+        <div class="row mt-4">
+            <div class="col-md-12">
+                <div class="card">
+                    <div class="card-header bg-dark text-white">
+                        <h5 class="mb-0">Scan History</h5>
+                    </div>
+                    <div class="card-body">
+                        <div class="chart-container">
+                            <canvas id="history-chart"></canvas>
                         </div>
-                    {% endfor %}
+                    </div>
                 </div>
-            {% else %}
-                <div class="no-stocks">
-                    <p>No Chandelier Entry/Exit signals found in this scan.</p>
-                </div>
-            {% endif %}
+            </div>
         </div>
-        
-        <!-- Oversold Stocks Section -->
-        <div class="section">
-            <h2>📉 Stocks with Daily RSI below 30 (Potentially Oversold)</h2>
-            {% if oversold %}
-                <div class="grid-container">
-                    {% for stock in oversold %}
-                        <div class="stock-card oversold">
-                            <div class="stock-symbol">{{ stock.symbol }}
-                                <span class="timeframe">({{ stock.timeframe }})</span>
-                            </div>
-                            <div class="stock-details">
-                                <div class="detail-item">
-                                    <span>RSI: <strong>{{ stock.rsi }}</strong></span>
-                                </div>
-                                <div class="detail-item">
-                                    <span>Price: <strong>₹{{ stock.price }}</strong></span>
-                                </div>
-                            </div>
-                        </div>
-                    {% endfor %}
+
+        <div class="row mt-4">
+            <div class="col-md-12">
+                <div class="card">
+                    <div class="card-header bg-dark text-white">
+                        <h5 class="mb-0">Technical Criteria</h5>
+                    </div>
+                    <div class="card-body">
+                        <ul>
+                            <li>[=2] 5 minute close > [=1] 5 minute low</li>
+                            <li>[=3] 5 minute close > [=1] 5 minute low</li>
+                            <li>[=4] 5 minute close > [=1] 5 minute low</li>
+                            <li>[=2] 5 minute close < [=1] 5 minute high</li>
+                            <li>[=3] 5 minute close < [=1] 5 minute high</li>
+                            <li>[=4] 5 minute close < [=1] 5 minute high</li>
+                            <li>[=1] 5 minute RSI(14) > 60</li>
+                            <li>[ =-1 ] 5 minute RSI(14) <= 60</li>
+                            <li>[=1] 30 minute RSI(14) > 60</li>
+                            <li>[=1] 5 minute close > 1 day ago high</li>
+                            <li>[=1] 5 minute open > 1 day ago high</li>
+                        </ul>
+                    </div>
                 </div>
-            {% else %}
-                <div class="no-stocks">
-                    <p>No oversold stocks found in this scan.</p>
-                </div>
-            {% endif %}
+            </div>
         </div>
-        
-        <!-- Overbought Stocks Section -->
-        <div class="section">
-            <h2>📈 Stocks with Weekly/Monthly RSI above 60 (Potentially Overbought)</h2>
-            {% if overbought %}
-                <div class="grid-container">
-                    {% for stock in overbought %}
-                        <div class="stock-card overbought">
-                            <div class="stock-symbol">{{ stock.symbol }}
-                                <span class="timeframe">({{ stock.timeframe }})</span>
-                            </div>
-                            <div class="stock-details">
-                                <div class="detail-item">
-                                    <span>RSI: <strong>{{ stock.rsi }}</strong></span>
+
+        <footer class="mt-5 mb-3 text-center text-muted">
+            <p>&copy; 2025 NIFTY Technical Analyzer | Data refreshes every 15 minutes</p>
+        </footer>
+    </div>
+
+    <script src="https://cdn.jsdelivr.net/npm/bootstrap@5.3.0-alpha1/dist/js/bootstrap.bundle.min.js"></script>
+    <script src="https://cdn.jsdelivr.net/npm/chart.js"></script>
+    <script>
+        let historyChart = null;
+
+        // Function to fetch data and update UI
+        function fetchAndUpdateData() {
+            document.getElementById('loading-indicator').style.display = 'block';
+            
+            fetch('/api/data')
+                .then(response => response.json())
+                .then(data => {
+                    document.getElementById('loading-indicator').style.display = 'none';
+                    
+                    // Update last update time
+                    document.getElementById('last-update').textContent = `Last update: ${data.last_update || 'Not yet updated'}`;
+                    
+                    // Clear existing cards
+                    const container = document.getElementById('recommendations-container');
+                    container.innerHTML = '';
+                    
+                    // Show/hide no stocks message
+                    const noStocksAlert = document.getElementById('no-stocks');
+                    if (!data.buy_recommendations || data.buy_recommendations.length === 0) {
+                        noStocksAlert.style.display = 'block';
+                    } else {
+                        noStocksAlert.style.display = 'none';
+                        
+                        // Add stock cards
+                        data.buy_recommendations.forEach(stock => {
+                            const card = document.createElement('div');
+                            card.className = 'col-md-4';
+                            card.innerHTML = `
+                                <div class="card stock-card">
+                                    <div class="card-header d-flex justify-content-between align-items-center">
+                                        <h5 class="mb-0">${stock.symbol}</h5>
+                                        <span class="badge buy-badge">BUY</span>
+                                    </div>
+                                    <div class="card-body">
+                                        <h6 class="card-subtitle mb-2 text-muted">${stock.company}</h6>
+                                        <p class="card-text">Current Price: ₹${stock.current_price.toFixed(2)}</p>
+                                        <div class="row">
+                                            <div class="col-6">
+                                                <p class="mb-1">RSI (5m): ${stock.rsi_5m.toFixed(2)}</p>
+                                                <p class="mb-1">RSI (30m): ${stock.rsi_30m.toFixed(2)}</p>
+                                            </div>
+                                            <div class="col-6">
+                                                <p class="mb-1">Day High: ₹${stock.day_high.toFixed(2)}</p>
+                                                <p class="mb-1">Day Low: ₹${stock.day_low.toFixed(2)}</p>
+                                            </div>
+                                        </div>
+                                    </div>
+                                    <div class="card-footer text-muted">
+                                        Signal generated: ${stock.timestamp}
+                                    </div>
                                 </div>
-                                <div class="detail-item">
-                                    <span>Price: <strong>₹{{ stock.price }}</strong></span>
-                                </div>
-                            </div>
-                        </div>
-                    {% endfor %}
-                </div>
-            {% else %}
-                <div class="no-stocks">
-                    <p>No overbought stocks found in this scan.</p>
-                </div>
-            {% endif %}
-        </div>
+                            `;
+                            container.appendChild(card);
+                        });
+                    }
+                    
+                    // Update history chart
+                    updateHistoryChart(data.data_history);
+                })
+                .catch(error => {
+                    console.error('Error fetching data:', error);
+                    document.getElementById('loading-indicator').style.display = 'none';
+                });
+        }
         
-        <div class="disclaimer">
-            <p>Disclaimer: This information is for educational purposes only and should not be considered as financial advice. 
-            Always do your own research before making investment decisions.</p>
-            <p>Technical indicators should be used alongside other analysis methods. Trade with proper risk management.</p>
-        </div>
-    </body>
-    </html>
-    '''
-    
-    return render_template_string(html_template, oversold=oversold_stocks, overbought=overbought_stocks, 
-                                 chandelier=chandelier_signals, date=current_date, market_open=is_market_open)
+        // Function to update history chart
+        function updateHistoryChart(historyData) {
+            if (!historyData || historyData.length === 0) return;
+            
+            const labels = historyData.map(item => {
+                const date = new Date(item.timestamp);
+                return date.toLocaleTimeString();
+            });
+            
+            const counts = historyData.map(item => item.recommendations);
+            
+            if (historyChart) {
+                historyChart.data.labels = labels;
+                historyChart.data.datasets[0].data = counts;
+                historyChart.update();
+            } else {
+                const ctx = document.getElementById('history-chart').getContext('2d');
+                historyChart = new Chart(ctx, {
+                    type: 'line',
+                    data: {
+                        labels: labels,
+                        datasets: [{
+                            label: 'Number of Recommendations',
+                            data: counts,
+                            backgroundColor: 'rgba(54, 162, 235, 0.2)',
+                            borderColor: 'rgba(54, 162, 235, 1)',
+                            borderWidth: 2,
+                            tension: 0.3
+                        }]
+                    },
+                    options: {
+                        responsive: true,
+                        maintainAspectRatio: false,
+                        scales: {
+                            y: {
+                                beginAtZero: true,
+                                ticks: {
+                                    precision: 0
+                                }
+                            }
+                        }
+                    }
+                });
+            }
+        }
 
-def run_flask_app():
-    """Run the Flask app on a separate thread."""
-    app.run(host='0.0.0.0', port=5000)
-
-def is_market_hours():
-    """Check if it's currently market hours in India (9:15 AM to 3:30 PM IST on weekdays)."""
-    ist_now = datetime.now(pytz.timezone('Asia/Kolkata'))
-    weekday = ist_now.weekday()
-    current_time = ist_now.time()
-    
-    # Check if it's a weekday (0-4 represents Monday to Friday)
-    if weekday < 5:
-        # Check if it's between 9:15 AM and 3:30 PM
-        market_open = time(9, 15)
-        market_close = time(15, 30)
-        return market_open <= current_time <= market_close
-    
-    return False
-
-def run_analysis():
-    """Run the analysis, send to Telegram and update webpage."""
-    global oversold_stocks, overbought_stocks, chandelier_signals
-    
-    current_time = datetime.now(pytz.timezone('Asia/Kolkata')).strftime("%H:%M:%S")
-    logger.info(f"Running technical analysis for Nifty stocks at {current_time}...")
-    
-    # Run analysis
-    daily_oversold, combined_overbought, new_chandelier_signals = analyze_stocks()
-    
-    # Update global variables for web display
-    oversold_stocks = daily_oversold
-    overbought_stocks = combined_overbought
-    chandelier_signals = new_chandelier_signals
-    
-    # Send to Telegram only if there are signals to report
-    if daily_oversold or combined_overbought or new_chandelier_signals:
-        message = format_message(daily_oversold, combined_overbought, new_chandelier_signals)
-        send_telegram_message(message)
+        // Initial fetch
+        fetchAndUpdateData();
         
-        # Log summary
-        logger.info(f"Analysis complete. Found {len(daily_oversold)} oversold, {len(combined_overbought)} overbought stocks, and {len(new_chandelier_signals)} chandelier signals.")
-    else:
-        logger.info("Analysis complete. No significant technical signals found.")
-
-def start_scheduler():
-    """Start the scheduler to run the analysis with different intervals during/after market hours."""
-    scheduler = BlockingScheduler(timezone=pytz.timezone('Asia/Kolkata'))
+        // Refresh every minute to show countdown
+        setInterval(fetchAndUpdateData, 60000);
+    </script>
+</body>
+</html>
+        """)
     
-    # Run every 10 minutes during market hours on weekdays
-    scheduler.add_job(
-        run_analysis, 
-        'cron', 
-        day_of_week='mon-fri', 
-        hour='9-15', 
-        minute='*/10'
-    )
-    
-    # Run after market hours on weekdays at 4:00 PM for daily analysis
-    scheduler.add_job(
-        run_analysis, 
-        'cron', 
-        day_of_week='mon-fri', 
-        hour=16, 
-        minute=0
-    )
-    
-    logger.info("Scheduler started. Will run analysis every 10 minutes during market hours and at 4:00 PM IST on weekdays.")
-    scheduler.start()
+    logger.info("Created template files")
 
 if __name__ == "__main__":
-    # Start Flask in a separate thread
-    flask_thread = threading.Thread(target=run_flask_app)
-    flask_thread.daemon = True
-    flask_thread.start()
-    
-    # Run initial analysis
-    run_analysis()
-    
-    # Start scheduler for scheduled runs
-    start_scheduler()
+    try:
+        # Create template directory and files
+        create_templates()
+        
+        # Download NIFTY 500 stock list
+        download_nifty500_list()
+        
+        # Run initial scan
+        scan_stocks()
+        
+        # Start periodic scan in a separate thread
+        scan_thread = threading.Thread(target=periodic_scan)
+        scan_thread.daemon = True
+        scan_thread.start()
+        
+        # Start Flask app
+        port = int(os.environ.get("PORT", 5000))
+        app.run(host="0.0.0.0", port=port)
+        
+    except Exception as e:
+        logger.error(f"Error in main: {e}")
