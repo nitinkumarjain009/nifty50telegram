@@ -4,7 +4,7 @@ import yfinance as yf
 import requests
 from ta.momentum import RSIIndicator
 import pytz
-from datetime import datetime, time
+from datetime import datetime, time, timedelta
 import logging
 from apscheduler.schedulers.blocking import BlockingScheduler
 import os
@@ -16,31 +16,48 @@ logging.basicConfig(level=logging.INFO, format='%(asctime)s - %(levelname)s - %(
 logger = logging.getLogger(__name__)
 
 # Telegram configuration
-TELEGRAM_TOKEN = 'YOUR_TELEGRAM_BOT_TOKEN'
-TELEGRAM_CHAT_ID = 'YOUR_TELEGRAM_CHAT_ID'
+TELEGRAM_TOKEN = '8017759392:AAEwM-W-y83lLXTjlPl8sC_aBmizuIrFXnU'
+TELEGRAM_CHAT_ID = '711856868'
 
 # Flask app for web display
 app = Flask(__name__)
 oversold_stocks = []
+overbought_stocks = []
 
 # Configuration
 NIFTY_INDEX = "^NSEI"  # Nifty 50 index
 NIFTY_STOCKS_FILE = "nifty50_stocks.csv"  # You'll need to create this CSV with stock symbols
 RSI_PERIOD = 14
-RSI_THRESHOLD = 30
+OVERSOLD_THRESHOLD = 30
+OVERBOUGHT_THRESHOLD = 60
 
-def calculate_rsi(ticker_symbol, period=14):
-    """Calculate RSI for a given stock ticker."""
+def calculate_rsi(ticker_symbol, period=14, timeframe="daily"):
+    """Calculate RSI for a given stock ticker and timeframe."""
     try:
-        # Get data for the last 30 days to have enough data points for RSI calculation
-        data = yf.download(ticker_symbol, period="30d", interval="1d", progress=False)
-        
-        if data.empty or len(data) < period:
-            logger.warning(f"Not enough data for {ticker_symbol}")
+        # Set interval and period based on timeframe
+        if timeframe == "daily":
+            interval = "1d"
+            hist_period = "30d"
+        elif timeframe == "weekly":
+            interval = "1wk"
+            hist_period = "200d"  # Need more historical data for weekly
+        elif timeframe == "monthly":
+            interval = "1mo"
+            hist_period = "600d"  # Need more historical data for monthly
+        else:
+            logger.error(f"Invalid timeframe: {timeframe}")
             return None, None
         
-        # Calculate RSI
-        rsi_indicator = RSIIndicator(close=data['Close'], window=period)
+        # Get data
+        data = yf.download(ticker_symbol, period=hist_period, interval=interval, progress=False)
+        
+        if data.empty or len(data) < period + 1:
+            logger.warning(f"Not enough {timeframe} data for {ticker_symbol}")
+            return None, None
+        
+        # Calculate RSI - pass the Series not the DataFrame
+        close_series = data['Close']
+        rsi_indicator = RSIIndicator(close=close_series, window=period)
         data['RSI'] = rsi_indicator.rsi()
         
         # Get the latest values
@@ -50,7 +67,7 @@ def calculate_rsi(ticker_symbol, period=14):
         return latest_rsi, latest_price
     
     except Exception as e:
-        logger.error(f"Error calculating RSI for {ticker_symbol}: {e}")
+        logger.error(f"Error calculating {timeframe} RSI for {ticker_symbol}: {e}")
         return None, None
 
 def get_nifty_stocks():
@@ -69,9 +86,11 @@ def get_nifty_stocks():
         return []
 
 def analyze_stocks():
-    """Analyze stocks for RSI < 30 condition."""
+    """Analyze stocks for RSI conditions."""
     stocks = get_nifty_stocks()
-    results = []
+    daily_oversold = []
+    weekly_overbought = []
+    monthly_overbought = []
     
     for stock in stocks:
         # Ensure proper Yahoo Finance ticker format
@@ -80,18 +99,44 @@ def analyze_stocks():
         else:
             stock_symbol = stock
             
-        rsi, price = calculate_rsi(stock_symbol, RSI_PERIOD)
+        # Calculate RSI for different timeframes
+        daily_rsi, daily_price = calculate_rsi(stock_symbol, RSI_PERIOD, "daily")
+        weekly_rsi, weekly_price = calculate_rsi(stock_symbol, RSI_PERIOD, "weekly")
+        monthly_rsi, monthly_price = calculate_rsi(stock_symbol, RSI_PERIOD, "monthly")
         
-        if rsi is not None and rsi < RSI_THRESHOLD:
-            stock_name = stock.replace(".NS", "").replace(".BO", "")
-            results.append({
+        stock_name = stock.replace(".NS", "").replace(".BO", "")
+        
+        # Check daily oversold condition
+        if daily_rsi is not None and daily_rsi < OVERSOLD_THRESHOLD:
+            daily_oversold.append({
                 "symbol": stock_name,
-                "rsi": round(rsi, 2),
-                "price": round(price, 2)
+                "rsi": round(daily_rsi, 2),
+                "price": round(daily_price, 2),
+                "timeframe": "daily"
             })
-            logger.info(f"Found oversold stock: {stock_name} with RSI: {rsi:.2f}")
+            logger.info(f"Found daily oversold stock: {stock_name} with RSI: {daily_rsi:.2f}")
+        
+        # Check weekly overbought condition
+        if weekly_rsi is not None and weekly_rsi > OVERBOUGHT_THRESHOLD:
+            weekly_overbought.append({
+                "symbol": stock_name,
+                "rsi": round(weekly_rsi, 2),
+                "price": round(weekly_price, 2),
+                "timeframe": "weekly"
+            })
+            logger.info(f"Found weekly overbought stock: {stock_name} with RSI: {weekly_rsi:.2f}")
+            
+        # Check monthly overbought condition
+        if monthly_rsi is not None and monthly_rsi > OVERBOUGHT_THRESHOLD:
+            monthly_overbought.append({
+                "symbol": stock_name,
+                "rsi": round(monthly_rsi, 2),
+                "price": round(monthly_price, 2),
+                "timeframe": "monthly"
+            })
+            logger.info(f"Found monthly overbought stock: {stock_name} with RSI: {monthly_rsi:.2f}")
     
-    return results
+    return daily_oversold, weekly_overbought + monthly_overbought
 
 def send_telegram_message(message):
     """Send message to Telegram channel."""
@@ -110,32 +155,42 @@ def send_telegram_message(message):
     except Exception as e:
         logger.error(f"Error sending Telegram message: {e}")
 
-def format_message(results):
+def format_message(oversold_stocks, overbought_stocks):
     """Format the analysis results as a Telegram message."""
-    if not results:
-        return "No Nifty stocks with RSI below 30 found today."
+    current_date = datetime.now(pytz.timezone('Asia/Kolkata')).strftime("%d-%b-%Y %H:%M:%S")
+    message = f"<b>🔍 Nifty RSI Analysis ({current_date})</b>\n\n"
     
-    current_date = datetime.now(pytz.timezone('Asia/Kolkata')).strftime("%d-%b-%Y")
+    # Format oversold stocks
+    if oversold_stocks:
+        message += "<b>📉 Stocks with Daily RSI below 30 (Potentially Oversold):</b>\n\n"
+        for stock in oversold_stocks:
+            message += f"• <b>{stock['symbol']}</b>: RSI = {stock['rsi']} | Price = ₹{stock['price']}\n"
+        message += "\n"
     
-    message = f"<b>🔍 Nifty Oversold Stocks Analysis ({current_date})</b>\n\n"
-    message += "<b>Stocks with RSI below 30:</b>\n\n"
+    # Format overbought stocks
+    if overbought_stocks:
+        message += "<b>📈 Stocks with Weekly/Monthly RSI above 60 (Potentially Overbought):</b>\n\n"
+        for stock in overbought_stocks:
+            message += f"• <b>{stock['symbol']}</b> ({stock['timeframe']}): RSI = {stock['rsi']} | Price = ₹{stock['price']}\n"
     
-    for stock in results:
-        message += f"• <b>{stock['symbol']}</b>: RSI = {stock['rsi']} | Price = ₹{stock['price']}\n"
+    # If no stocks found
+    if not oversold_stocks and not overbought_stocks:
+        message += "No stocks meeting RSI criteria found in this scan."
     
-    message += "\n<i>These stocks may be technically oversold. Consider for potential entry with proper risk management.</i>"
+    message += "\n<i>Technical indicators should be used alongside other analysis methods. Trade with proper risk management.</i>"
     return message
 
 @app.route('/')
 def home():
     """Render the web page with analysis results."""
-    current_date = datetime.now(pytz.timezone('Asia/Kolkata')).strftime("%d-%b-%Y")
+    current_date = datetime.now(pytz.timezone('Asia/Kolkata')).strftime("%d-%b-%Y %H:%M:%S")
     
     html_template = '''
     <!DOCTYPE html>
     <html>
     <head>
         <title>Nifty RSI Analysis</title>
+        <meta http-equiv="refresh" content="1800"> <!-- Refresh every 30 minutes -->
         <style>
             body {
                 font-family: Arial, sans-serif;
@@ -151,6 +206,10 @@ def home():
                 border-bottom: 2px solid #3498db;
                 padding-bottom: 10px;
             }
+            h2 {
+                color: #2c3e50;
+                margin-top: 30px;
+            }
             .stock-card {
                 background-color: #f9f9f9;
                 border-radius: 5px;
@@ -158,10 +217,21 @@ def home():
                 margin-bottom: 10px;
                 box-shadow: 0 2px 4px rgba(0,0,0,0.1);
             }
+            .oversold {
+                border-left: 4px solid #e74c3c;
+            }
+            .overbought {
+                border-left: 4px solid #2ecc71;
+            }
             .stock-symbol {
                 font-weight: bold;
                 font-size: 18px;
                 color: #2980b9;
+            }
+            .timeframe {
+                color: #7f8c8d;
+                font-size: 14px;
+                margin-left: 10px;
             }
             .stock-details {
                 display: flex;
@@ -186,17 +256,28 @@ def home():
                 text-align: center;
                 border-radius: 5px;
             }
+            @media (max-width: 600px) {
+                body {
+                    padding: 10px;
+                }
+                .stock-details {
+                    flex-direction: column;
+                }
+            }
         </style>
     </head>
     <body>
         <h1>Nifty Stocks RSI Analysis</h1>
         <p class="last-updated">Last updated: {{ date }}</p>
         
-        {% if stocks %}
-            <h2>Stocks with RSI below 30 (Potentially Oversold)</h2>
-            {% for stock in stocks %}
-                <div class="stock-card">
-                    <div class="stock-symbol">{{ stock.symbol }}</div>
+        <!-- Oversold Stocks Section -->
+        <h2>📉 Stocks with Daily RSI below 30 (Potentially Oversold)</h2>
+        {% if oversold %}
+            {% for stock in oversold %}
+                <div class="stock-card oversold">
+                    <div class="stock-symbol">{{ stock.symbol }}
+                        <span class="timeframe">({{ stock.timeframe }})</span>
+                    </div>
                     <div class="stock-details">
                         <span>RSI: <strong>{{ stock.rsi }}</strong></span>
                         <span>Price: <strong>₹{{ stock.price }}</strong></span>
@@ -205,7 +286,27 @@ def home():
             {% endfor %}
         {% else %}
             <div class="no-stocks">
-                <p>No Nifty stocks with RSI below 30 found today.</p>
+                <p>No oversold stocks found in this scan.</p>
+            </div>
+        {% endif %}
+        
+        <!-- Overbought Stocks Section -->
+        <h2>📈 Stocks with Weekly/Monthly RSI above 60 (Potentially Overbought)</h2>
+        {% if overbought %}
+            {% for stock in overbought %}
+                <div class="stock-card overbought">
+                    <div class="stock-symbol">{{ stock.symbol }}
+                        <span class="timeframe">({{ stock.timeframe }})</span>
+                    </div>
+                    <div class="stock-details">
+                        <span>RSI: <strong>{{ stock.rsi }}</strong></span>
+                        <span>Price: <strong>₹{{ stock.price }}</strong></span>
+                    </div>
+                </div>
+            {% endfor %}
+        {% else %}
+            <div class="no-stocks">
+                <p>No overbought stocks found in this scan.</p>
             </div>
         {% endif %}
         
@@ -217,52 +318,72 @@ def home():
     </html>
     '''
     
-    return render_template_string(html_template, stocks=oversold_stocks, date=current_date)
+    return render_template_string(html_template, oversold=oversold_stocks, overbought=overbought_stocks, date=current_date)
 
 def run_flask_app():
     """Run the Flask app on a separate thread."""
     app.run(host='0.0.0.0', port=5000)
 
-def run_daily_analysis():
-    """Run the analysis, send to Telegram and update webpage."""
-    global oversold_stocks
-    
-    logger.info("Starting daily RSI analysis for Nifty stocks...")
-    
-    # Check if market is closed (after 3:30 PM IST)
+def is_market_hours():
+    """Check if it's currently market hours in India (9:15 AM to 3:30 PM IST on weekdays)."""
     ist_now = datetime.now(pytz.timezone('Asia/Kolkata'))
-    market_closed = ist_now.time() > time(15, 30)
+    weekday = ist_now.weekday()
+    current_time = ist_now.time()
     
-    if not market_closed:
-        logger.info("Market still open. Waiting until after market hours.")
-        return
+    # Check if it's a weekday (0-4 represents Monday to Friday)
+    if weekday < 5:
+        # Check if it's between 9:15 AM and 3:30 PM
+        market_open = time(9, 15)
+        market_close = time(15, 30)
+        return market_open <= current_time <= market_close
+    
+    return False
+
+def run_analysis():
+    """Run the analysis, send to Telegram and update webpage."""
+    global oversold_stocks, overbought_stocks
+    
+    current_time = datetime.now(pytz.timezone('Asia/Kolkata')).strftime("%H:%M:%S")
+    logger.info(f"Running RSI analysis for Nifty stocks at {current_time}...")
     
     # Run analysis
-    results = analyze_stocks()
-    oversold_stocks = results  # Update global variable for web display
+    daily_oversold, combined_overbought = analyze_stocks()
+    
+    # Update global variables for web display
+    oversold_stocks = daily_oversold
+    overbought_stocks = combined_overbought
     
     # Send to Telegram
-    if results:
-        message = format_message(results)
+    if daily_oversold or combined_overbought:
+        message = format_message(daily_oversold, combined_overbought)
         send_telegram_message(message)
-        logger.info(f"Analysis complete. Found {len(results)} oversold stocks.")
+        logger.info(f"Analysis complete. Found {len(daily_oversold)} oversold and {len(combined_overbought)} overbought stocks.")
     else:
-        logger.info("Analysis complete. No oversold stocks found.")
+        logger.info("Analysis complete. No stocks meeting RSI criteria found.")
 
 def start_scheduler():
-    """Start the scheduler to run the analysis daily after market hours."""
+    """Start the scheduler to run the analysis during and after market hours."""
     scheduler = BlockingScheduler(timezone=pytz.timezone('Asia/Kolkata'))
     
-    # Run every weekday (Monday to Friday) at 4:00 PM IST
+    # Run every 30 minutes during market hours on weekdays
     scheduler.add_job(
-        run_daily_analysis, 
+        run_analysis, 
+        'cron', 
+        day_of_week='mon-fri', 
+        hour='9-15', 
+        minute='15,45'
+    )
+    
+    # Run after market hours on weekdays at 4:00 PM
+    scheduler.add_job(
+        run_analysis, 
         'cron', 
         day_of_week='mon-fri', 
         hour=16, 
         minute=0
     )
     
-    logger.info("Scheduler started. Will run analysis at 4:00 PM IST on weekdays.")
+    logger.info("Scheduler started. Will run analysis every 30 minutes during market hours and at 4:00 PM IST on weekdays.")
     scheduler.start()
 
 if __name__ == "__main__":
@@ -272,7 +393,7 @@ if __name__ == "__main__":
     flask_thread.start()
     
     # Run initial analysis
-    run_daily_analysis()
+    run_analysis()
     
-    # Start scheduler for daily runs
+    # Start scheduler for scheduled runs
     start_scheduler()
