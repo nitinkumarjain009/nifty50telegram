@@ -28,14 +28,14 @@ chandelier_signals = []
 
 # Configuration
 NIFTY_INDEX = "^NSEI"  # Nifty 50 index
-NIFTY_STOCKS_FILE = "nifty50_stocks.csv"  # You'll need to create this CSV with stock symbols
+NIFTY_STOCKS_FILE = "nifty50_stocks.csv"  # CSV with stock symbols
 RSI_PERIOD = 14
 OVERSOLD_THRESHOLD = 30
 OVERBOUGHT_THRESHOLD = 60
 
-# Chandelier Exit configuration
-ATR_PERIOD = 22
-CHANDELIER_MULTIPLIER = 3
+# Chandelier Exit configuration - updated based on Pine Script
+ATR_PERIOD = 1  # Changed from 22 to 1 as per Pine Script
+CHANDELIER_MULTIPLIER = 2.0  # Changed from 3 to 2.0 as per Pine Script
 
 def calculate_rsi(ticker_symbol, period=14, timeframe="daily"):
     """Calculate RSI for a given stock ticker and timeframe."""
@@ -83,8 +83,8 @@ def calculate_rsi(ticker_symbol, period=14, timeframe="daily"):
         logger.error(f"Error calculating {timeframe} RSI for {ticker_symbol}: {e}")
         return None, None
 
-def calculate_chandelier_exit(ticker_symbol, atr_period=22, multiplier=3):
-    """Calculate Chandelier Exit for a given stock ticker."""
+def calculate_chandelier_exit(ticker_symbol, atr_period=1, multiplier=2.0):
+    """Calculate Chandelier Entry/Exit for a given stock ticker using the updated strategy from Pine Script."""
     try:
         # Get data for the past 60 days to have enough history
         data = yf.download(ticker_symbol, period="60d", interval="1d", progress=False)
@@ -103,23 +103,25 @@ def calculate_chandelier_exit(ticker_symbol, atr_period=22, multiplier=3):
         # Calculate lowest low for short exit
         data['lowest_low'] = data['Low'].rolling(window=atr_period).min()
         
-        # Calculate Chandelier Exit Long (for sell signals)
+        # Calculate Chandelier Exit Long (for exit long and enter short signals)
         data['chandelier_long'] = data['highest_high'] - (multiplier * atr)
         
-        # Calculate Chandelier Exit Short (for buy signals)
+        # Calculate Chandelier Exit Short (for exit short and enter long signals)
         data['chandelier_short'] = data['lowest_low'] + (multiplier * atr)
         
-        # Determine signal
+        # Determine signal based on Pine Script logic (crossover/crossunder)
         current_close = data['Close'].iloc[-1]
         previous_close = data['Close'].iloc[-2]
         chandelier_long = data['chandelier_long'].iloc[-1]
         chandelier_short = data['chandelier_short'].iloc[-1]
+        previous_chandelier_long = data['chandelier_long'].iloc[-2]
+        previous_chandelier_short = data['chandelier_short'].iloc[-2]
         
-        # Buy signal: Price crosses above the Chandelier Exit Short
-        buy_signal = previous_close <= data['chandelier_short'].iloc[-2] and current_close > chandelier_short
+        # Buy signal: Price crosses above the Chandelier Long Exit
+        buy_signal = previous_close <= previous_chandelier_long and current_close > chandelier_long
         
-        # Sell signal: Price crosses below the Chandelier Exit Long
-        sell_signal = previous_close >= data['chandelier_long'].iloc[-2] and current_close < chandelier_long
+        # Sell signal: Price crosses below the Chandelier Short Exit
+        sell_signal = previous_close >= previous_chandelier_short and current_close < chandelier_short
         
         signal = None
         if buy_signal:
@@ -134,18 +136,26 @@ def calculate_chandelier_exit(ticker_symbol, atr_period=22, multiplier=3):
         return None, None, None
 
 def get_nifty_stocks():
-    """Get the list of Nifty stocks from CSV file or fallback to a sample list."""
+    """Get the list of Nifty stocks from CSV file."""
     try:
         if os.path.exists(NIFTY_STOCKS_FILE):
             df = pd.read_csv(NIFTY_STOCKS_FILE)
-            return df['Symbol'].tolist()
+            # Check for the Symbol column or fallback to first column
+            if 'Symbol' in df.columns:
+                stock_list = df['Symbol'].tolist()
+            else:
+                # Assume the first column contains symbols
+                stock_list = df.iloc[:, 0].tolist()
+                
+            logger.info(f"Loaded {len(stock_list)} stocks from {NIFTY_STOCKS_FILE}")
+            return stock_list
         else:
             # Fallback to a sample of Nifty 50 stocks
             logger.warning(f"{NIFTY_STOCKS_FILE} not found. Using sample stock list.")
             return ["RELIANCE.NS", "TCS.NS", "HDFCBANK.NS", "INFY.NS", "ICICIBANK.NS", 
                     "HDFC.NS", "ITC.NS", "KOTAKBANK.NS", "LT.NS", "HINDUNILVR.NS"]
     except Exception as e:
-        logger.error(f"Error loading stock list: {e}")
+        logger.error(f"Error loading stock list from CSV: {e}")
         return []
 
 def analyze_stocks():
@@ -200,7 +210,7 @@ def analyze_stocks():
             })
             logger.info(f"Found monthly overbought stock: {stock_name} with RSI: {monthly_rsi:.2f}")
         
-        # Calculate Chandelier Exit signals
+        # Calculate Chandelier Entry/Exit signals with updated parameters
         signal, long_exit, short_exit = calculate_chandelier_exit(stock_symbol, ATR_PERIOD, CHANDELIER_MULTIPLIER)
         
         if signal:
@@ -244,7 +254,7 @@ def format_message(oversold_stocks, overbought_stocks, chandelier_signals):
     
     # Format Chandelier Exit signals (prioritize these)
     if chandelier_signals:
-        message += "<b>🔔 Chandelier Exit Signals:</b>\n\n"
+        message += "<b>🔔 Chandelier Entry/Exit Signals:</b>\n\n"
         for stock in chandelier_signals:
             signal_emoji = "🟢" if stock['signal'] == "BUY" else "🔴"
             rsi_info = f" | RSI = {stock['daily_rsi']}" if stock['daily_rsi'] is not None else ""
@@ -446,7 +456,7 @@ def home():
         
         <!-- Chandelier Exit Signals Section -->
         <div class="section">
-            <h2>🔔 Chandelier Exit Signals</h2>
+            <h2>🔔 Chandelier Entry/Exit Signals</h2>
             {% if chandelier %}
                 <div class="grid-container">
                     {% for stock in chandelier %}
@@ -475,7 +485,7 @@ def home():
                 </div>
             {% else %}
                 <div class="no-stocks">
-                    <p>No Chandelier Exit signals found in this scan.</p>
+                    <p>No Chandelier Entry/Exit signals found in this scan.</p>
                 </div>
             {% endif %}
         </div>
