@@ -176,7 +176,7 @@ def format_message(oversold_stocks, overbought_stocks):
     
     # Format overbought stocks
     if overbought_stocks:
-        message += "<b>📈 Stocks with Weekly/Monthly RSI above 60 (Potentially Overbought):</b>\n\n"
+        message += "<b>📈 Stocks with Weekly/Monthly RSI above 70 (Potentially Overbought):</b>\n\n"
         for stock in overbought_stocks:
             message += f"• <b>{stock['symbol']}</b> ({stock['timeframe']}): RSI = {stock['rsi']} | Price = ₹{stock['price']}\n"
     
@@ -298,7 +298,7 @@ def home():
         {% endif %}
         
         <!-- Overbought Stocks Section -->
-        <h2>📈 Stocks with Weekly/Monthly RSI above 60 (Potentially Overbought)</h2>
+        <h2>📈 Stocks with Weekly/Monthly RSI above 70 (Potentially Overbought)</h2>
         {% if overbought %}
             {% for stock in overbought %}
                 <div class="stock-card overbought">
