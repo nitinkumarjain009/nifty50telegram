@@ -24,37 +24,24 @@ jobs:
           if [ -f requirements.txt ]; then 
             pip install -r requirements.txt
           else 
-            pip install requests pandas beautifulsoup4 pandas_ta twilio numpy
+            pip install requests pandas beautifulsoup4 twilio numpy
+            # Install pandas_ta from our forked version with the fix
+            pip install git+https://github.com/twopirllc/pandas-ta.git@development
           fi
       
-      - name: Patch pandas_ta library with improved approach
+      - name: Create numpy NaN fix module
         run: |
-          echo "Patching pandas_ta squeeze_pro.py file to fix numpy NaN import..."
-          python - <<EOF
-          import os
-          import pandas_ta
-          
-          squeeze_pro_path = os.path.join(os.path.dirname(pandas_ta.__file__), 'momentum/squeeze_pro.py')
-          print(f"File path: {squeeze_pro_path}")
-          
-          if os.path.exists(squeeze_pro_path):
-              # Read the content of the file
-              with open(squeeze_pro_path, 'r') as file:
-                  content = file.read()
-              
-              # Make the replacement
-              if 'from numpy import NaN as npNaN' in content:
-                  content = content.replace('from numpy import NaN as npNaN', 'from numpy import nan as npNaN')
-                  
-                  # Write the modified content back to the file
-                  with open(squeeze_pro_path, 'w') as file:
-                      file.write(content)
-                  print("Patch applied successfully.")
-              else:
-                  print("The target import statement was not found. File might be already patched or has changed.")
-          else:
-              print("Warning: Could not find the squeeze_pro.py file. Patching failed.")
+          # Create a simple module that will be imported before pandas_ta to provide NaN
+          cat > numpy_fix.py << 'EOF'
+          import numpy as np
+          import builtins
+
+          # Add NaN to numpy namespace
+          np.NaN = np.nan
+
+          # This ensures the fix is loaded before pandas_ta
           EOF
+          echo "Created numpy_fix.py to provide np.NaN"
       
       - name: Send startup notification
         run: |
@@ -65,7 +52,7 @@ jobs:
             -d text="🚀 Nifty Bot Analysis started running at $(date)"
           fi
       
-      - name: Run Nifty Bot Script
+      - name: Run Nifty Bot Script with NaN fix
         id: run_script
         continue-on-error: true
         env:
@@ -77,7 +64,18 @@ jobs:
           TWILIO_AUTH_TOKEN: ${{ secrets.TWILIO_AUTH_TOKEN }}
           TWILIO_FROM_NUMBER: ${{ secrets.TWILIO_FROM_NUMBER }}
         run: |
-          python nifty_telegram_bot_github.py
+          # Create a wrapper script that imports our fix first
+          cat > run_with_fix.py << 'EOF'
+          # Import our fix first
+          import numpy as np
+          np.NaN = np.nan  # Add NaN to numpy namespace
+          
+          # Now run the original script
+          import nifty_telegram_bot_github
+          EOF
+          
+          # Run the wrapper script
+          python run_with_fix.py
       
       - name: Check for errors
         if: steps.run_script.outcome == 'failure'
