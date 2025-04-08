@@ -9,4 +9,10 @@ ta
 pytz 
 apscheduler 
 flask
-talib
+pandas==2.1.1
+numpy==1.26.0
+requests==2.31.0
+Flask
+TA-Lib
+python-telegram-bot
+gunicorn==21.2.0
