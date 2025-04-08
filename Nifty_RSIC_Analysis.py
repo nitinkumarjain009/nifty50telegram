@@ -837,3 +837,16 @@ def create_templates():
 </body>
 </html>
 """)
+if __name__ == '__main__':
+    # Download NIFTY 500 list if not already present
+    download_nifty500_list()
+    
+    # Create templates directory and files
+    create_templates()
+    
+    # Start the periodic scan in a separate thread
+    scan_thread = threading.Thread(target=periodic_scan, daemon=True)
+    scan_thread.start()
+    
+    # Run the Flask app
+    app.run(host='0.0.0.0', port=5000, debug=False)
