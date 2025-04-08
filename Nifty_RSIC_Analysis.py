@@ -615,3 +615,250 @@ def create_templates():
                             <li>[=2] 5 minute close > [=1] 5 minute low</li>
                             <li>[=3] 5 minute close > [=1] 5 minute low</li>
                             <li>[=4] 5 minute close > [=1] 5 minute low</li>
+                            <li>[=2] 5 minute close < [=1] 5 minute high</li>
+                            <li>[=3] 5 minute close < [=1] 5 minute high</li>
+                            <li>[=4] 5 minute close < [=1] 5 minute high</li>
+                            <li>[=1] 5 minute RSI(14) > 60</li>
+                            <li>[ =-1 ] 5 minute RSI(14) <= 60</li>
+                            <li>[=1] 30 minute RSI(14) > 60</li>
+                            <li>[=1] 5 minute close > 1 day ago high</li>
+                            <li>[=1] 5 minute open > 1 day ago high</li>
+                        </ul>
+                    </div>
+                </div>
+            </div>
+        </div>
+    </div>
+
+    <!-- JavaScript -->
+    <script src="https://cdn.jsdelivr.net/npm/bootstrap@5.3.0-alpha1/dist/js/bootstrap.bundle.min.js"></script>
+    <script src="https://code.jquery.com/jquery-3.7.0.min.js"></script>
+    <script src="https://cdn.datatables.net/1.13.6/js/jquery.dataTables.min.js"></script>
+    <script src="https://cdn.datatables.net/1.13.6/js/dataTables.bootstrap5.min.js"></script>
+    <script src="https://cdn.jsdelivr.net/npm/chart.js"></script>
+
+    <script>
+        // DataTable initialization
+        let stocksTable;
+        
+        // Chart for history
+        let historyChart;
+        
+        // Refresh data every 60 seconds
+        const REFRESH_INTERVAL_MS = 60000;
+        
+        // Function to fetch data from API
+        function fetchData() {
+            fetch('/api/data')
+                .then(response => response.json())
+                .then(data => {
+                    updateUI(data);
+                    $('#loading-indicator').hide();
+                })
+                .catch(error => {
+                    console.error('Error fetching data:', error);
+                    $('#loading-indicator').hide();
+                });
+        }
+        
+        // Function to update UI with new data
+        function updateUI(data) {
+            // Update market status and timing info
+            $('#market-status').text(data.market_status);
+            $('#market-status').removeClass('market-open market-closed').addClass(data.market_status === 'Open' ? 'market-open' : 'market-closed');
+            
+            if (data.last_update) {
+                $('#last-update').text('Last update: ' + data.last_update);
+            }
+            
+            if (data.next_update) {
+                $('#next-update').text('Next update: ' + data.next_update);
+            }
+            
+            // Update recommendations
+            const recommendationsContainer = $('#recommendations-container');
+            recommendationsContainer.empty();
+            
+            if (data.buy_recommendations && data.buy_recommendations.length > 0) {
+                $('#no-stocks').hide();
+                
+                data.buy_recommendations.forEach(stock => {
+                    const pctChangeClass = stock.pct_change >= 0 ? 'positive-change' : 'negative-change';
+                    const pctChangePrefix = stock.pct_change >= 0 ? '+' : '';
+                    
+                    const card = `
+                        <div class="col-md-4">
+                            <div class="card stock-card">
+                                <div class="card-header bg-dark text-white d-flex justify-content-between align-items-center">
+                                    <h5 class="mb-0">${stock.symbol}</h5>
+                                    <span class="badge buy-badge">BUY</span>
+                                </div>
+                                <div class="card-body">
+                                    <h6 class="card-subtitle mb-2 text-muted">${stock.company}</h6>
+                                    <p class="card-text fs-4">₹${stock.current_price.toFixed(2)} <span class="${pctChangeClass}">(${pctChangePrefix}${stock.pct_change.toFixed(2)}%)</span></p>
+                                    <div class="d-flex justify-content-between mb-2">
+                                        <small class="text-muted">Day High: ₹${stock.day_high.toFixed(2)}</small>
+                                        <small class="text-muted">Day Low: ₹${stock.day_low.toFixed(2)}</small>
+                                    </div>
+                                    <table class="table table-sm">
+                                        <tbody>
+                                            <tr>
+                                                <td>5m RSI</td>
+                                                <td><strong>${stock.rsi_5m.toFixed(2)}</strong></td>
+                                            </tr>
+                                            <tr>
+                                                <td>30m RSI</td>
+                                                <td><strong>${stock.rsi_30m.toFixed(2)}</strong></td>
+                                            </tr>
+                                            <tr>
+                                                <td>Weekly RSI</td>
+                                                <td><strong>${stock.weekly_rsi ? stock.weekly_rsi.toFixed(2) : 'N/A'}</strong></td>
+                                            </tr>
+                                            <tr>
+                                                <td>Monthly RSI</td>
+                                                <td><strong>${stock.monthly_rsi ? stock.monthly_rsi.toFixed(2) : 'N/A'}</strong></td>
+                                            </tr>
+                                        </tbody>
+                                    </table>
+                                    <small class="text-muted">Last updated: ${stock.timestamp}</small>
+                                </div>
+                            </div>
+                        </div>
+                    `;
+                    recommendationsContainer.append(card);
+                });
+            } else {
+                $('#no-stocks').show();
+            }
+            
+            // Update all stocks table
+            if (stocksTable) {
+                stocksTable.clear();
+                
+                if (data.all_stocks_data && data.all_stocks_data.length > 0) {
+                    data.all_stocks_data.forEach(stock => {
+                        const pctChangeClass = stock.pct_change >= 0 ? 'positive-change' : 'negative-change';
+                        const pctChangePrefix = stock.pct_change >= 0 ? '+' : '';
+                        
+                        stocksTable.row.add([
+                            stock.symbol,
+                            stock.company,
+                            '₹' + stock.current_price.toFixed(2),
+                            `<span class="${pctChangeClass}">${pctChangePrefix}${stock.pct_change.toFixed(2)}%</span>`,
+                            stock.weekly_rsi ? stock.weekly_rsi.toFixed(2) : 'N/A',
+                            stock.monthly_rsi ? stock.monthly_rsi.toFixed(2) : 'N/A'
+                        ]);
+                    });
+                    
+                    stocksTable.draw();
+                }
+            }
+            
+            // Update history chart
+            updateHistoryChart(data.data_history);
+        }
+        
+        // Function to update history chart
+        function updateHistoryChart(historyData) {
+            if (!historyData || historyData.length === 0) return;
+            
+            const labels = historyData.map(item => {
+                // Format timestamp for readability
+                const date = new Date(item.timestamp);
+                return date.toLocaleTimeString([], { hour: '2-digit', minute: '2-digit' });
+            });
+            
+            const counts = historyData.map(item => item.recommendations);
+            
+            if (historyChart) {
+                historyChart.data.labels = labels;
+                historyChart.data.datasets[0].data = counts;
+                historyChart.update();
+            } else {
+                const ctx = document.getElementById('history-chart').getContext('2d');
+                historyChart = new Chart(ctx, {
+                    type: 'line',
+                    data: {
+                        labels: labels,
+                        datasets: [{
+                            label: 'Number of Buy Recommendations',
+                            data: counts,
+                            borderColor: 'rgba(40, 167, 69, 1)',
+                            backgroundColor: 'rgba(40, 167, 69, 0.1)',
+                            borderWidth: 2,
+                            fill: true,
+                            tension: 0.4
+                        }]
+                    },
+                    options: {
+                        responsive: true,
+                        maintainAspectRatio: false,
+                        scales: {
+                            y: {
+                                beginAtZero: true,
+                                ticks: {
+                                    precision: 0
+                                }
+                            }
+                        },
+                        plugins: {
+                            tooltip: {
+                                callbacks: {
+                                    afterLabel: function(context) {
+                                        const index = context.dataIndex;
+                                        const symbols = historyData[index].symbols;
+                                        if (symbols.length === 0) return 'No stocks';
+                                        return 'Stocks: ' + symbols.join(', ');
+                                    }
+                                }
+                            }
+                        }
+                    }
+                });
+            }
+        }
+        
+        // Initialize on document ready
+        $(document).ready(function() {
+            // Initialize DataTable
+            stocksTable = $('#all-stocks-table').DataTable({
+                pageLength: 25,
+                order: [[3, 'desc']], // Sort by change percentage
+                columnDefs: [
+                    { type: 'html', targets: 3 } // For HTML content in change column
+                ]
+            });
+            
+            // Initial data fetch
+            fetchData();
+            
+            // Set up periodic refresh
+            setInterval(fetchData, REFRESH_INTERVAL_MS);
+        });
+    </script>
+</body>
+</html>
+""")
+def main():
+    """Main function to run the application"""
+    try:
+        # Download NIFTY 500 stock list if not available
+        download_nifty500_list()
+        
+        # Create HTML templates
+        create_templates()
+        
+        # Start scanning thread
+        scan_thread = threading.Thread(target=periodic_scan, daemon=True)
+        scan_thread.start()
+        
+        # Run Flask application
+        port = int(os.environ.get("PORT", 5000))
+        app.run(host='0.0.0.0', port=port, debug=False)
+    
+    except Exception as e:
+        logger.error(f"Error in main: {e}")
+
+if __name__ == "__main__":
+    main()
+  
