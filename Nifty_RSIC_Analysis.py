@@ -834,4 +834,3 @@ def create_templates():
         });
     });
 </script>
-
