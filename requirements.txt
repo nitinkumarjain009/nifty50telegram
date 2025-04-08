@@ -9,3 +9,4 @@ ta
 pytz 
 apscheduler 
 flask
+talib
