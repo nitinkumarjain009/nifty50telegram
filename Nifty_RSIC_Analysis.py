@@ -36,7 +36,8 @@ results = {
     'buy_recommendations': [],
     'data_history': [],  # To store historical recommendations
     'market_status': 'Closed',  # Current market status
-    'next_update': None  # When the next scan will occur
+    'next_update': None,  # When the next scan will occur
+    'all_stocks_data': []  # All stocks data for the table
 }
 
 def is_market_open():
@@ -98,7 +99,7 @@ def download_nifty500_list():
 def get_stock_data(symbol, interval='5m', period='5d'):
     """Get stock data for the given symbol using yfinance"""
     try:
-        logger.info(f"Fetching data for {symbol}")
+        logger.info(f"Fetching data for {symbol} ({interval}, {period})")
         stock = yf.Ticker(symbol)
         df = stock.history(period=period, interval=interval)
         if df.empty:
@@ -116,6 +117,82 @@ def calculate_rsi(data, window=14):
     # Calculate RSI using pandas-ta
     data.ta.rsi(close='Close', length=window, append=True)
     return data[f'RSI_{window}']  # The column name format used by pandas-ta
+
+def update_all_stocks_data():
+    """Update data for all stocks including price, % change, weekly RSI, monthly RSI"""
+    try:
+        logger.info("Updating all stocks data for table display...")
+        
+        # Read NIFTY 500 stock list
+        df = pd.read_csv(NIFTY500_CSV_PATH)
+        symbols = df['Symbol'].tolist()
+        
+        all_stocks = []
+        
+        for symbol in symbols:
+            try:
+                # Get daily data for percentage change calculation
+                df_daily = get_stock_data(symbol, interval='1d', period='5d')
+                if df_daily is None or len(df_daily) < 2:
+                    continue
+                
+                # Get weekly data for weekly RSI
+                df_weekly = get_stock_data(symbol, interval='1wk', period='20wk')
+                if df_weekly is None or len(df_weekly) < 14:
+                    df_weekly = None  # We'll handle this case
+                
+                # Get monthly data for monthly RSI
+                df_monthly = get_stock_data(symbol, interval='1mo', period='24mo')
+                if df_monthly is None or len(df_monthly) < 14:
+                    df_monthly = None  # We'll handle this case
+                
+                # Calculate current price and percentage change
+                current_price = df_daily['Close'].iloc[-1]
+                prev_day_close = df_daily['Close'].iloc[-2]
+                pct_change = ((current_price - prev_day_close) / prev_day_close) * 100
+                
+                # Calculate RSIs
+                weekly_rsi = None
+                monthly_rsi = None
+                
+                if df_weekly is not None:
+                    df_weekly['RSI'] = calculate_rsi(df_weekly)
+                    if 'RSI' in df_weekly.columns and not df_weekly['RSI'].isna().all():
+                        weekly_rsi = df_weekly['RSI'].iloc[-1]
+                
+                if df_monthly is not None:
+                    df_monthly['RSI'] = calculate_rsi(df_monthly)
+                    if 'RSI' in df_monthly.columns and not df_monthly['RSI'].isna().all():
+                        monthly_rsi = df_monthly['RSI'].iloc[-1]
+                
+                # Get company name
+                company_name = df[df['Symbol'] == symbol]['Company'].iloc[0]
+                
+                # Create stock data object
+                stock_data = {
+                    'symbol': symbol,
+                    'company': company_name,
+                    'current_price': current_price,
+                    'pct_change': pct_change,
+                    'weekly_rsi': weekly_rsi,
+                    'monthly_rsi': monthly_rsi,
+                    'timestamp': datetime.datetime.now(pytz.timezone('Asia/Kolkata')).strftime('%Y-%m-%d %H:%M:%S')
+                }
+                
+                all_stocks.append(stock_data)
+                
+            except Exception as e:
+                logger.error(f"Error processing {symbol} for all stocks table: {e}")
+        
+        # Sort stocks by percentage change (descending)
+        all_stocks.sort(key=lambda x: x['pct_change'], reverse=True)
+        
+        # Update results
+        results['all_stocks_data'] = all_stocks
+        logger.info(f"Updated data for {len(all_stocks)} stocks")
+        
+    except Exception as e:
+        logger.error(f"Error in update_all_stocks_data: {e}")
 
 def check_technical_conditions(symbol):
     """Check if the stock passes all technical conditions"""
@@ -179,15 +256,37 @@ def check_technical_conditions(symbol):
         conditions_met = all(all_conditions)
         
         if conditions_met:
+            # Get weekly RSI
+            df_weekly = get_stock_data(symbol, interval='1wk', period='20wk')
+            weekly_rsi = None
+            if df_weekly is not None and len(df_weekly) >= 14:
+                df_weekly['RSI'] = calculate_rsi(df_weekly)
+                weekly_rsi = df_weekly['RSI'].iloc[-1]
+
+            # Get monthly RSI
+            df_monthly = get_stock_data(symbol, interval='1mo', period='24mo')
+            monthly_rsi = None
+            if df_monthly is not None and len(df_monthly) >= 14:
+                df_monthly['RSI'] = calculate_rsi(df_monthly)
+                monthly_rsi = df_monthly['RSI'].iloc[-1]
+            
+            # Calculate percentage change
+            prev_close = df_1d['Close'].iloc[-2]
+            curr_close = df_1d['Close'].iloc[-1]
+            pct_change = ((curr_close - prev_close) / prev_close) * 100
+            
             details = {
                 'symbol': symbol,
                 'company': get_company_name(symbol),
                 'current_price': df_5m['Close'].iloc[-1],
                 'previous_close': df_5m['Close'].iloc[-2],
+                'pct_change': pct_change,
                 'day_high': df_1d['High'].iloc[-1],
                 'day_low': df_1d['Low'].iloc[-1],
                 'rsi_5m': df_5m['RSI'].iloc[-1],
                 'rsi_30m': df_30m['RSI'].iloc[-1],
+                'weekly_rsi': weekly_rsi,
+                'monthly_rsi': monthly_rsi,
                 'timestamp': datetime.datetime.now(pytz.timezone('Asia/Kolkata')).strftime('%Y-%m-%d %H:%M:%S')
             }
             return True, details
@@ -237,9 +336,9 @@ def format_telegram_message(recommendations):
     
     for rec in recommendations:
         message += f"<b>{rec['symbol']} ({rec['company']})</b>\n"
-        message += f"💰 Price: ₹{rec['current_price']:.2f}\n"
-        message += f"📈 RSI (5m): {rec['rsi_5m']:.2f}\n"
-        message += f"📈 RSI (30m): {rec['rsi_30m']:.2f}\n"
+        message += f"💰 Price: ₹{rec['current_price']:.2f} ({rec['pct_change']:.2f}%)\n"
+        message += f"📈 RSI (5m): {rec['rsi_5m']:.2f} | RSI (30m): {rec['rsi_30m']:.2f}\n"
+        message += f"📊 Weekly RSI: {rec['weekly_rsi']:.2f if rec['weekly_rsi'] else 'N/A'} | Monthly RSI: {rec['monthly_rsi']:.2f if rec['monthly_rsi'] else 'N/A'}\n"
         message += f"❗ <b>BUY RECOMMENDATION</b>\n\n"
     
     message += f"🕒 Updated at: {datetime.datetime.now(pytz.timezone('Asia/Kolkata')).strftime('%Y-%m-%d %H:%M:%S')}"
@@ -286,6 +385,9 @@ def scan_stocks():
             next_scan_time = ist_now + datetime.timedelta(seconds=seconds_to_open)
         
         results['next_update'] = next_scan_time.strftime('%Y-%m-%d %H:%M:%S')
+        
+        # Update all stocks data table
+        update_all_stocks_data()
         
         # Send Telegram notification only if market is open or it's the after-hours summary
         if buy_recommendations and (is_market_open() or 
@@ -371,6 +473,8 @@ def create_templates():
     <meta name="viewport" content="width=device-width, initial-scale=1.0">
     <title>NIFTY 500 Technical Scanner</title>
     <link href="https://cdn.jsdelivr.net/npm/bootstrap@5.3.0-alpha1/dist/css/bootstrap.min.css" rel="stylesheet">
+    <link rel="stylesheet" href="https://cdn.jsdelivr.net/npm/bootstrap-icons@1.11.0/font/bootstrap-icons.css">
+    <link rel="stylesheet" href="https://cdn.datatables.net/1.13.6/css/dataTables.bootstrap5.min.css">
     <style>
         body { padding-top: 20px; }
         .stock-card { margin-bottom: 20px; transition: all 0.3s; }
@@ -380,6 +484,11 @@ def create_templates():
         .chart-container { height: 300px; margin-top: 30px; }
         .market-open { color: #28a745; font-weight: bold; }
         .market-closed { color: #dc3545; font-weight: bold; }
+        .positive-change { color: #28a745; }
+        .negative-change { color: #dc3545; }
+        .tab-content { padding-top: 20px; }
+        .nav-tabs { margin-bottom: 0; }
+        .dataTables_wrapper { margin-top: 15px; }
     </style>
 </head>
 <body>
@@ -405,20 +514,62 @@ def create_templates():
             </div>
         </div>
 
-        <div class="row">
-            <div class="col-md-12">
+        <ul class="nav nav-tabs" id="myTab" role="tablist">
+            <li class="nav-item" role="presentation">
+                <button class="nav-link active" id="recommendations-tab" data-bs-toggle="tab" data-bs-target="#recommendations" type="button" role="tab" aria-controls="recommendations" aria-selected="true">Buy Recommendations</button>
+            </li>
+            <li class="nav-item" role="presentation">
+                <button class="nav-link" id="all-stocks-tab" data-bs-toggle="tab" data-bs-target="#all-stocks" type="button" role="tab" aria-controls="all-stocks" aria-selected="false">All Stocks</button>
+            </li>
+            <li class="nav-item" role="presentation">
+                <button class="nav-link" id="history-tab" data-bs-toggle="tab" data-bs-target="#history" type="button" role="tab" aria-controls="history" aria-selected="false">History</button>
+            </li>
+            <li class="nav-item" role="presentation">
+                <button class="nav-link" id="criteria-tab" data-bs-toggle="tab" data-bs-target="#criteria" type="button" role="tab" aria-controls="criteria" aria-selected="false">Criteria</button>
+            </li>
+        </ul>
+
+        <div class="tab-content" id="myTabContent">
+            <!-- BUY RECOMMENDATIONS TAB -->
+            <div class="tab-pane fade show active" id="recommendations" role="tabpanel" aria-labelledby="recommendations-tab">
                 <div class="alert alert-info" id="no-stocks" style="display:none;">
                     No stocks currently match all the technical criteria. Check back soon!
                 </div>
+                <div class="row" id="recommendations-container">
+                    <!-- Stock cards will be inserted here -->
+                </div>
             </div>
-        </div>
 
-        <div class="row" id="recommendations-container">
-            <!-- Stock cards will be inserted here -->
-        </div>
+            <!-- ALL STOCKS TAB -->
+            <div class="tab-pane fade" id="all-stocks" role="tabpanel" aria-labelledby="all-stocks-tab">
+                <div class="card">
+                    <div class="card-header bg-dark text-white">
+                        <h5 class="mb-0">All NIFTY 500 Stocks</h5>
+                    </div>
+                    <div class="card-body">
+                        <div class="table-responsive">
+                            <table id="all-stocks-table" class="table table-striped table-hover" style="width:100%">
+                                <thead>
+                                    <tr>
+                                        <th>Symbol</th>
+                                        <th>Company</th>
+                                        <th>Price (₹)</th>
+                                        <th>Change (%)</th>
+                                        <th>Weekly RSI</th>
+                                        <th>Monthly RSI</th>
+                                    </tr>
+                                </thead>
+                                <tbody>
+                                    <!-- Stock data will be inserted here -->
+                                </tbody>
+                            </table>
+                        </div>
+                    </div>
+                </div>
+            </div>
 
-        <div class="row mt-4">
-            <div class="col-md-12">
+            <!-- HISTORY TAB -->
+            <div class="tab-pane fade" id="history" role="tabpanel" aria-labelledby="history-tab">
                 <div class="card">
                     <div class="card-header bg-dark text-white">
                         <h5 class="mb-0">Scan History</h5>
@@ -430,10 +581,9 @@ def create_templates():
                     </div>
                 </div>
             </div>
-        </div>
 
-        <div class="row mt-4">
-            <div class="col-md-12">
+            <!-- CRITERIA TAB -->
+            <div class="tab-pane fade" id="criteria" role="tabpanel" aria-labelledby="criteria-tab">
                 <div class="card">
                     <div class="card-header bg-dark text-white">
                         <h5 class="mb-0">Technical Criteria</h5>
@@ -464,204 +614,224 @@ def create_templates():
 
     <script src="https://cdn.jsdelivr.net/npm/bootstrap@5.3.0-alpha1/dist/js/bootstrap.bundle.min.js"></script>
     <script src="https://cdn.jsdelivr.net/npm/chart.js"></script>
-    <script>
-        let historyChart = null;
-        let countdownInterval = null;
-
-        // Function to format remaining time
-        function formatCountdown(targetTimeStr) {
-            const now = new Date();
-            const target = new Date(targetTimeStr);
-            
-            // Calculate difference in seconds
-            let diff = Math.floor((target - now) / 1000);
-            
-            if (diff <= 0) return "Any moment now...";
-            
-            const hours = Math.floor(diff / 3600);
-            diff -= hours * 3600;
-            const minutes = Math.floor(diff / 60);
-            const seconds = diff - minutes * 60;
-            
-            let result = "";
-            if (hours > 0) result += `${hours}h `;
-            if (minutes > 0 || hours > 0) result += `${minutes}m `;
-            result += `${seconds}s`;
-            
-            return result;
+    <script src="https://code.jquery.com/jquery-3.7.0.min.js"></script>
+<script src="https://cdn.datatables.net/1.13.6/js/jquery.dataTables.min.js"></script>
+<script src="https://cdn.datatables.net/1.13.6/js/dataTables.bootstrap5.min.js"></script>
+<script>
+    // Initialize DataTable
+    let allStocksTable;
+    
+    // Function to format percentage change with color
+    function formatPercentChange(value) {
+        if (value === null || isNaN(value)) return 'N/A';
+        const formattedValue = value.toFixed(2) + '%';
+        if (value > 0) {
+            return `<span class="positive-change">+${formattedValue}</span>`;
+        } else if (value < 0) {
+            return `<span class="negative-change">${formattedValue}</span>`;
+        } else {
+            return formattedValue;
         }
-
-        // Update countdown timer
-        function updateCountdown(nextUpdateTime) {
-            if (countdownInterval) {
-                clearInterval(countdownInterval);
-            }
-            
-            function update() {
-                const countdownStr = formatCountdown(nextUpdateTime);
-                document.getElementById('next-update').textContent = `Next update: ${countdownStr}`;
-            }
-            
-            update(); // Initial update
-            countdownInterval = setInterval(update, 1000);
+    }
+    
+    // Function to format RSI with color
+    function formatRSI(value) {
+        if (value === null || isNaN(value)) return 'N/A';
+        const formattedValue = value.toFixed(2);
+        if (value > 70) {
+            return `<span class="text-danger">${formattedValue}</span>`;
+        } else if (value < 30) {
+            return `<span class="text-success">${formattedValue}</span>`;
+        } else {
+            return formattedValue;
         }
-
-        // Function to fetch data and update UI
-        function fetchAndUpdateData() {
-            document.getElementById('loading-indicator').style.display = 'block';
+    }
+    
+    // Function to update the UI with latest data
+    function updateUI(data) {
+        // Update market status and timestamps
+        $('#market-status').text(data.market_status)
+            .removeClass('market-open market-closed')
+            .addClass(data.market_status === 'Open' ? 'market-open' : 'market-closed');
+        
+        $('#last-update').text('Last update: ' + data.last_update);
+        $('#next-update').text('Next update: ' + data.next_update);
+        
+        // Hide loading indicator
+        $('#loading-indicator').hide();
+        
+        // Update recommendations
+        const recommendationsContainer = $('#recommendations-container');
+        recommendationsContainer.empty();
+        
+        if (data.buy_recommendations.length === 0) {
+            $('#no-stocks').show();
+        } else {
+            $('#no-stocks').hide();
             
-            fetch('/api/data')
-                .then(response => response.json())
-                .then(data => {
-                    document.getElementById('loading-indicator').style.display = 'none';
-                    
-                    // Update last update time
-                    document.getElementById('last-update').textContent = `Last update: ${data.last_update || 'Not yet updated'}`;
-                    
-                    // Update market status
-                    const marketStatusElement = document.getElementById('market-status');
-                    marketStatusElement.textContent = data.market_status;
-                    if (data.market_status === 'Open') {
-                        marketStatusElement.className = 'market-open';
-                    } else {
-                        marketStatusElement.className = 'market-closed';
-                    }
-                    
-                    // Update next update countdown
-                    if (data.next_update) {
-                        updateCountdown(data.next_update);
-                    }
-                    
-                    // Clear existing cards
-                    const container = document.getElementById('recommendations-container');
-                    container.innerHTML = '';
-                    
-                    // Show/hide no stocks message
-                    const noStocksAlert = document.getElementById('no-stocks');
-                    if (!data.buy_recommendations || data.buy_recommendations.length === 0) {
-                        noStocksAlert.style.display = 'block';
-                    } else {
-                        noStocksAlert.style.display = 'none';
-                        
-                        // Add stock cards
-                        data.buy_recommendations.forEach(stock => {
-                            const card = document.createElement('div');
-                            card.className = 'col-md-4';
-                            card.innerHTML = `
-                                <div class="card stock-card">
-                                    <div class="card-header d-flex justify-content-between align-items-center">
-                                        <h5 class="mb-0">${stock.symbol}</h5>
-                                        <span class="badge buy-badge">BUY</span>
-                                    </div>
-                                    <div class="card-body">
-                                        <h6 class="card-subtitle mb-2 text-muted">${stock.company}</h6>
-                                        <p class="card-text">Current Price: ₹${stock.current_price.toFixed(2)}</p>
-                                        <div class="row">
-                                            <div class="col-6">
-                                                <p class="mb-1">RSI (5m): ${stock.rsi_5m.toFixed(2)}</p>
-                                                <p class="mb-1">RSI (30m): ${stock.rsi_30m.toFixed(2)}</p>
-                                            </div>
-                                            <div class="col-6">
-                                                <p class="mb-1">Day High: ₹${stock.day_high.toFixed(2)}</p>
-                                                <p class="mb-1">Day Low: ₹${stock.day_low.toFixed(2)}</p>
-                                            </div>
-                                        </div>
-                                    </div>
-                                    <div class="card-footer text-muted">
-                                        Signal generated: ${stock.timestamp}
-                                    </div>
+            data.buy_recommendations.forEach(stock => {
+                const card = `
+                    <div class="col-md-4">
+                        <div class="card stock-card">
+                            <div class="card-header bg-dark text-white d-flex justify-content-between align-items-center">
+                                <h5 class="mb-0">${stock.symbol}</h5>
+                                <span class="badge buy-badge">BUY</span>
+                            </div>
+                            <div class="card-body">
+                                <h6 class="card-subtitle mb-2 text-muted">${stock.company}</h6>
+                                <p class="card-text">Current Price: ₹${stock.current_price.toFixed(2)}</p>
+                                <p class="card-text">Change: ${formatPercentChange(stock.pct_change)}</p>
+                                <p class="card-text">Day Range: ₹${stock.day_low.toFixed(2)} - ₹${stock.day_high.toFixed(2)}</p>
+                                <hr>
+                                <div class="table-responsive">
+                                    <table class="table table-sm table-borderless">
+                                        <thead>
+                                            <tr>
+                                                <th>RSI Type</th>
+                                                <th>Value</th>
+                                            </tr>
+                                        </thead>
+                                        <tbody>
+                                            <tr>
+                                                <td>5 Min RSI</td>
+                                                <td>${formatRSI(stock.rsi_5m)}</td>
+                                            </tr>
+                                            <tr>
+                                                <td>30 Min RSI</td>
+                                                <td>${formatRSI(stock.rsi_30m)}</td>
+                                            </tr>
+                                            <tr>
+                                                <td>Weekly RSI</td>
+                                                <td>${formatRSI(stock.weekly_rsi)}</td>
+                                            </tr>
+                                            <tr>
+                                                <td>Monthly RSI</td>
+                                                <td>${formatRSI(stock.monthly_rsi)}</td>
+                                            </tr>
+                                        </tbody>
+                                    </table>
                                 </div>
-                            `;
-                            container.appendChild(card);
-                        });
-                    }
-                    
-                    // Update history chart
-                    updateHistoryChart(data.data_history);
-                })
-                .catch(error => {
-                    console.error('Error fetching data:', error);
-                    document.getElementById('loading-indicator').style.display = 'none';
-                });
+                            </div>
+                            <div class="card-footer text-muted">
+                                <small>Detected at: ${stock.timestamp}</small>
+                            </div>
+                        </div>
+                    </div>
+                `;
+                recommendationsContainer.append(card);
+            });
         }
         
-        // Function to update history chart
-        function updateHistoryChart(historyData) {
-            if (!historyData || historyData.length === 0) return;
+        // Update all stocks table
+        if (allStocksTable) {
+            allStocksTable.clear();
             
-            const labels = historyData.map(item => {
-                const date = new Date(item.timestamp);
-                return date.toLocaleTimeString();
+            data.all_stocks_data.forEach(stock => {
+                allStocksTable.row.add([
+                    stock.symbol,
+                    stock.company,
+                    '₹' + stock.current_price.toFixed(2),
+                    formatPercentChange(stock.pct_change),
+                    formatRSI(stock.weekly_rsi),
+                    formatRSI(stock.monthly_rsi)
+                ]);
             });
             
-            const counts = historyData.map(item => item.recommendations);
-            
-            if (historyChart) {
-                historyChart.data.labels = labels;
-                historyChart.data.datasets[0].data = counts;
-                historyChart.update();
-            } else {
-                const ctx = document.getElementById('history-chart').getContext('2d');
-                historyChart = new Chart(ctx, {
-                    type: 'line',
-                    data: {
-                        labels: labels,
-                        datasets: [{
-                            label: 'Number of Recommendations',
-                            data: counts,
-                            backgroundColor: 'rgba(54, 162, 235, 0.2)',
-                            borderColor: 'rgba(54, 162, 235, 1)',
-                            borderWidth: 2,
-                            tension: 0.3
-                        }]
-                    },
-                    options: {
-                        responsive: true,
-                        maintainAspectRatio: false,
-                        scales: {
-                            y: {
-                                beginAtZero: true,
-                                ticks: {
-                                    precision: 0
-                                }
-                            }
+            allStocksTable.draw();
+        }
+        
+        // Update history chart
+        updateHistoryChart(data.data_history);
+    }
+    
+    // Function to initialize and update the history chart
+    function updateHistoryChart(historyData) {
+        const ctx = document.getElementById('history-chart').getContext('2d');
+        
+        // Extract data for chart
+        const labels = historyData.map(item => {
+            // Format timestamp to show only time
+            const date = new Date(item.timestamp);
+            return date.toLocaleTimeString();
+        });
+        
+        const counts = historyData.map(item => item.recommendations);
+        
+        // If chart already exists, destroy it
+        if (window.historyChart) {
+            window.historyChart.destroy();
+        }
+        
+        // Create new chart
+        window.historyChart = new Chart(ctx, {
+            type: 'bar',
+            data: {
+                labels: labels,
+                datasets: [{
+                    label: 'Number of Buy Recommendations',
+                    data: counts,
+                    backgroundColor: 'rgba(75, 192, 192, 0.6)',
+                    borderColor: 'rgba(75, 192, 192, 1)',
+                    borderWidth: 1
+                }]
+            },
+            options: {
+                scales: {
+                    y: {
+                        beginAtZero: true,
+                        ticks: {
+                            precision: 0
                         }
                     }
-                });
+                },
+                responsive: true,
+                maintainAspectRatio: false
             }
-        }
-
-        // Initial fetch
-        fetchAndUpdateData();
-        
-        // Refresh every minute to show countdown and changes
-        setInterval(fetchAndUpdateData, 60000);
-    </script>
-</body>
-</html>
-        """)
+        });
+    }
     
-    logger.info("Created template files")
+    // Function to fetch data from the server
+    function fetchData() {
+        $.ajax({
+            url: '/api/data',
+            type: 'GET',
+            dataType: 'json',
+            success: function(data) {
+                updateUI(data);
+            },
+            error: function(err) {
+                console.error('Error fetching data:', err);
+                $('#loading-indicator').hide();
+                alert('Error fetching data. Please check the console for details.');
+            }
+        });
+    }
+    
+    // Document ready function
+    $(document).ready(function() {
+        // Initialize DataTable
+        allStocksTable = $('#all-stocks-table').DataTable({
+            pageLength: 25,
+            order: [[3, 'desc']], // Sort by percentage change by default
+            responsive: true,
+            language: {
+                search: "Filter records:",
+                lengthMenu: "Show _MENU_ stocks per page",
+                info: "Showing _START_ to _END_ of _TOTAL_ stocks"
+            }
+        });
+        
+        // Initial data fetch
+        fetchData();
+        
+        // Set up periodic refresh - every 60 seconds
+        setInterval(fetchData, 60000);
+        
+        // Add click event to refresh button
+        $('#refresh-button').on('click', function() {
+            $('#loading-indicator').show();
+            fetchData();
+        });
+    });
+</script>
 
-if __name__ == "__main__":
-    try:
-        # Create template directory and files
-        create_templates()
-        
-        # Download NIFTY 500 stock list
-        download_nifty500_list()
-        
-        # Run initial scan
-        scan_stocks()
-        
-        # Start periodic scan in a separate thread
-        scan_thread = threading.Thread(target=periodic_scan)
-        scan_thread.daemon = True
-        scan_thread.start()
-        
-        # Start Flask app
-        port = int(os.environ.get("PORT", 5000))
-        app.run(host="0.0.0.0", port=port)
-        
-    except Exception as e:
-        logger.error(f"Error in main: {e}")
