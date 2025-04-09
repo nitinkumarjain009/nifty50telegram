@@ -20,4 +20,5 @@ tabulate
 # Data visualization
 plotly==5.15.0
 kaleido==0.2.1  # Required for plotly.io.write_image
+waitress
 
