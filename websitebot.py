@@ -1018,7 +1018,7 @@ def ensure_directories():
     
     # Format and send the analysis
     message = format_recommendations_message(recommendations)
-    await update.message.reply_markdown(message)
+        await update.message.reply_markdown(message)
     
     # Create and send chart
     try:
