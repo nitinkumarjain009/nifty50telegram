@@ -371,8 +371,11 @@ import threading
 import pytz
 
 # Add these constants
-TELEGRAM_BOT_TOKEN = "YOUR_BOT_TOKEN"  # Replace with your actual bot token
-TELEGRAM_CHAT_ID = "YOUR_CHAT_ID"  # Replace with your channel or chat ID
+TELEGRAM_BOT_TOKEN = "8017759392:AAEwM-W-y83lLXTjlPl8sC_aBmizuIrFXnU
+"  # Replace with your actual bot token
+TELEGRAM_CHAT_ID = "711856868"  # Replace with your channel or chat ID
+TELEGRAM_GROUP_CHANNEL = "@Stockniftybot"
+
 MARKET_OPEN_HOUR = 9  # 9 AM
 MARKET_CLOSE_HOUR = 15  # 3 PM
 SCAN_INTERVAL_MINUTES = 10
