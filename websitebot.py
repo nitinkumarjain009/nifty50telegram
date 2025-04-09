@@ -9,13 +9,12 @@ import ta  # Using ta instead of talib
 import schedule
 import threading
 from flask import Flask, render_template, jsonify
-import telepot
-from telepot.loop import MessageLoop
 import plotly.graph_objects as go
 import plotly.io as pio
 from plotly.subplots import make_subplots
 import warnings
 warnings.filterwarnings('ignore')
+from telegram import Bot
 
 # Configuration
 TELEGRAM_BOT_TOKEN = "YOUR_TELEGRAM_BOT_TOKEN"
