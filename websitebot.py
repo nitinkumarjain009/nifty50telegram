@@ -1,4 +1,4 @@
-# ChartInk Screener App
+# ChartInk Screener App - Updated to handle data extraction issues
 # This application:
 # 1. Scrapes data from chartink.com/screener/close-above-20-ema
 # 2. Sends the results to a Telegram channel
@@ -9,6 +9,7 @@ from bs4 import BeautifulSoup
 import pandas as pd
 import json
 import time
+import re
 from datetime import datetime
 import logging
 import os
@@ -57,36 +58,126 @@ def fetch_chartink_data():
         
         soup = BeautifulSoup(response.text, 'html.parser')
         
-        # Find the script that contains the data
+        # Log the page title to verify we're getting the right page
+        logger.info(f"Page title: {soup.title.string if soup.title else 'No title found'}")
+        
+        # Find the script that contains the data - try different approaches
         scripts = soup.find_all('script')
         data_script = None
         
+        # Method 1: Direct variable search
         for script in scripts:
             if script.string and 'var screener_results' in script.string:
                 data_script = script.string
+                logger.info("Found data using method 1: var screener_results")
                 break
+        
+        # Method 2: Look for any JSON data that resembles stock data
+        if not data_script:
+            for script in scripts:
+                if script.string and ('"nsecode"' in script.string or '"name"' in script.string) and ('"close"' in script.string):
+                    data_script = script.string
+                    logger.info("Found data using method 2: JSON pattern matching")
+                    break
+        
+        # Method 3: Try to find the data in a script tag by pattern
+        if not data_script:
+            pattern = r'var\s+\w+\s*=\s*(\[.*?\]);'
+            for script in scripts:
+                if script.string:
+                    matches = re.findall(pattern, script.string, re.DOTALL)
+                    for match in matches:
+                        try:
+                            test_data = json.loads(match)
+                            if isinstance(test_data, list) and len(test_data) > 0:
+                                if isinstance(test_data[0], dict) and ('nsecode' in test_data[0] or 'name' in test_data[0]):
+                                    data_script = match
+                                    logger.info("Found data using method 3: regex pattern matching")
+                                    break
+                        except:
+                            continue
+                if data_script:
+                    break
+                    
+        # Method 4: Look for data in API calls
+        if not data_script:
+            api_url = 'https://chartink.com/screener/process'
+            condition = 'close > ema(close,20)'
+            payload = {
+                'scan_clause': condition
+            }
+            
+            try:
+                api_response = requests.post(api_url, headers=headers, data=payload, timeout=30)
+                api_response.raise_for_status()
+                data_script = api_response.text
+                logger.info("Found data using method 4: API call")
+            except Exception as api_e:
+                logger.error(f"API call failed: {str(api_e)}")
         
         if not data_script:
             logger.error("Could not find screener results in the page")
+            # Save the HTML for debugging
+            with open('debug_page.html', 'w', encoding='utf-8') as f:
+                f.write(response.text)
+            logger.info("Saved HTML to debug_page.html for inspection")
             return None
         
         # Extract JSON data from the script
-        json_str = data_script.split('var screener_results = ')[1].split(';')[0]
-        data = json.loads(json_str)
+        json_data = None
         
-        # Process the data
+        # Try different approaches to extract the JSON
+        try:
+            # Method 1: Simple var extraction
+            if 'var screener_results = ' in data_script:
+                json_str = data_script.split('var screener_results = ')[1].split(';')[0]
+                json_data = json.loads(json_str)
+            # Method 2: If it's already JSON
+            elif data_script.strip().startswith('[') and data_script.strip().endswith(']'):
+                json_data = json.loads(data_script)
+            # Method 3: If it's in an API response format
+            elif '"data"' in data_script:
+                api_data = json.loads(data_script)
+                if 'data' in api_data:
+                    json_data = api_data['data']
+            
+            if not json_data:
+                # Last resort - try to find any JSON array in the text
+                pattern = r'\[(?:\{.*?\}(?:,|))+\]'
+                matches = re.findall(pattern, data_script, re.DOTALL)
+                for match in matches:
+                    try:
+                        test_data = json.loads(match)
+                        if isinstance(test_data, list) and len(test_data) > 0:
+                            if isinstance(test_data[0], dict):
+                                json_data = test_data
+                                break
+                    except:
+                        continue
+            
+            if not json_data:
+                logger.error("Could not parse JSON data")
+                return None
+                
+        except Exception as e:
+            logger.error(f"Error parsing JSON data: {str(e)}")
+            logger.error(f"Data script snippet: {data_script[:200]}...")  # Log a snippet for debugging
+            return None
+        
+        # Process the data - adapt field names based on what we have
         stocks = []
-        for item in data:
-            stock = {
-                'nsecode': item.get('nsecode', ''),
-                'name': item.get('name', ''),
-                'close': item.get('close', 0),
-                'per_chg': item.get('per_chg', 0),
-                'volume': item.get('volume', 0),
-                'ema_20': item.get('ema_20', 0),
-                'market_cap': item.get('market_cap', 0),
-                'industry': item.get('industry', '')
-            }
+        for item in json_data:
+            stock = {}
+            # Check for common field names and alternatives
+            stock['nsecode'] = item.get('nsecode', item.get('symbol', item.get('ticker', '')))
+            stock['name'] = item.get('name', item.get('company_name', stock['nsecode']))
+            stock['close'] = float(item.get('close', item.get('last_price', item.get('ltp', 0))))
+            stock['per_chg'] = float(item.get('per_chg', item.get('change_percent', item.get('percent_change', 0))))
+            stock['volume'] = int(item.get('volume', item.get('volume_traded', 0)))
+            stock['ema_20'] = float(item.get('ema_20', item.get('ema', stock['close'])))
+            stock['market_cap'] = float(item.get('market_cap', 0))
+            stock['industry'] = item.get('industry', item.get('sector', ''))
+            
             stocks.append(stock)
         
         df = pd.DataFrame(stocks)
@@ -161,6 +252,31 @@ def get_data():
     
     return cached_data['data']
 
+# Adding a function to generate sample data if we can't fetch real data
+def generate_sample_data():
+    """Generate sample data for testing when scraping fails."""
+    logger.info("Generating sample data for testing")
+    
+    sample_data = [
+        {'nsecode': 'RELIANCE', 'name': 'Reliance Industries', 'close': 2456.35, 'per_chg': 1.25, 'volume': 1456789, 'ema_20': 2400.50, 'market_cap': 1650000, 'industry': 'Oil & Gas'},
+        {'nsecode': 'TCS', 'name': 'Tata Consultancy Services', 'close': 3570.80, 'per_chg': 0.75, 'volume': 876543, 'ema_20': 3520.30, 'market_cap': 1320000, 'industry': 'IT'},
+        {'nsecode': 'HDFCBANK', 'name': 'HDFC Bank', 'close': 1680.45, 'per_chg': -0.50, 'volume': 2345678, 'ema_20': 1690.20, 'market_cap': 930000, 'industry': 'Banking'},
+        {'nsecode': 'INFY', 'name': 'Infosys', 'close': 1740.30, 'per_chg': 0.90, 'volume': 1234567, 'ema_20': 1720.15, 'market_cap': 740000, 'industry': 'IT'},
+        {'nsecode': 'ICICIBANK', 'name': 'ICICI Bank', 'close': 950.75, 'per_chg': 0.25, 'volume': 3456789, 'ema_20': 940.50, 'market_cap': 660000, 'industry': 'Banking'},
+        {'nsecode': 'HINDUNILVR', 'name': 'Hindustan Unilever', 'close': 2540.60, 'per_chg': -0.30, 'volume': 567890, 'ema_20': 2550.40, 'market_cap': 598000, 'industry': 'FMCG'},
+        {'nsecode': 'SBIN', 'name': 'State Bank of India', 'close': 595.25, 'per_chg': 1.75, 'volume': 5678901, 'ema_20': 580.10, 'market_cap': 531000, 'industry': 'Banking'},
+        {'nsecode': 'BAJFINANCE', 'name': 'Bajaj Finance', 'close': 7120.40, 'per_chg': -1.20, 'volume': 890123, 'ema_20': 7200.30, 'market_cap': 430000, 'industry': 'Finance'},
+        {'nsecode': 'BHARTIARTL', 'name': 'Bharti Airtel', 'close': 850.30, 'per_chg': 0.65, 'volume': 2345678, 'ema_20': 840.20, 'market_cap': 475000, 'industry': 'Telecom'},
+        {'nsecode': 'KOTAKBANK', 'name': 'Kotak Mahindra Bank', 'close': 1920.15, 'per_chg': -0.40, 'volume': 789012, 'ema_20': 1930.25, 'market_cap': 380000, 'industry': 'Banking'},
+        {'nsecode': 'ADANIPORTS', 'name': 'Adani Ports', 'close': 780.50, 'per_chg': 2.80, 'volume': 3456789, 'ema_20': 760.25, 'market_cap': 168000, 'industry': 'Infrastructure'},
+        {'nsecode': 'ASIANPAINT', 'name': 'Asian Paints', 'close': 3450.75, 'per_chg': 0.35, 'volume': 456789, 'ema_20': 3435.60, 'market_cap': 331000, 'industry': 'Consumer Goods'},
+        {'nsecode': 'AXISBANK', 'name': 'Axis Bank', 'close': 1040.20, 'per_chg': 1.15, 'volume': 2345678, 'ema_20': 1025.80, 'market_cap': 320000, 'industry': 'Banking'},
+        {'nsecode': 'TATASTEEL', 'name': 'Tata Steel', 'close': 128.35, 'per_chg': 1.90, 'volume': 7890123, 'ema_20': 125.80, 'market_cap': 156000, 'industry': 'Metals'},
+        {'nsecode': 'MARUTI', 'name': 'Maruti Suzuki', 'close': 10220.50, 'per_chg': -0.75, 'volume': 345678, 'ema_20': 10300.25, 'market_cap': 308000, 'industry': 'Automobile'},
+    ]
+    
+    return pd.DataFrame(sample_data)
+
 # Flask routes
 @app.route('/')
 def index():
@@ -171,12 +287,22 @@ def index():
 def api_data():
     """API endpoint to get the data."""
     df = get_data()
+    
+    # If we couldn't fetch real data, use sample data
     if df is None:
-        return jsonify({'error': 'Failed to fetch data'}), 500
+        logger.warning("Using sample data as fallback")
+        df = generate_sample_data()
+        cached_data['data'] = df
+        cached_data['timestamp'] = time.time()
+        
+        # Send update to Telegram with sample data notice
+        message = "⚠️ SAMPLE DATA: Real data could not be fetched from ChartInk\n\n" + format_telegram_message(df)
+        send_to_telegram(message)
     
     return jsonify({
         'data': df.to_dict('records'),
-        'updated_at': datetime.fromtimestamp(cached_data['timestamp']).strftime('%Y-%m-%d %H:%M:%S') if cached_data['timestamp'] else None
+        'updated_at': datetime.fromtimestamp(cached_data['timestamp']).strftime('%Y-%m-%d %H:%M:%S') if cached_data['timestamp'] else None,
+        'is_sample': df is cached_data['data'] and cached_data['data'] is not None and len(df) <= 15  # Check if we're using sample data
     })
 
 # Create HTML templates directory and template file
@@ -200,6 +326,15 @@ with open('templates/index.html', 'w') as f:
         .down { color: red; }
         .last-updated { font-style: italic; font-size: 0.9rem; margin-bottom: 15px; }
         .loading { text-align: center; padding: 40px; }
+        .sample-data-notice { 
+            background-color: #fff3cd; 
+            color: #856404; 
+            border: 1px solid #ffeeba; 
+            padding: 10px; 
+            border-radius: 5px; 
+            margin-bottom: 15px; 
+            display: none;
+        }
     </style>
 </head>
 <body>
@@ -214,6 +349,10 @@ with open('templates/index.html', 'w') as f:
                     </div>
                     <div class="card-body">
                         <div id="lastUpdated" class="last-updated">Loading data...</div>
+                        <div id="sampleDataNotice" class="sample-data-notice">
+                            <i class="bi bi-exclamation-triangle"></i> 
+                            <strong>Note:</strong> Displaying sample data as ChartInk data could not be fetched. This data is for demonstration purposes only.
+                        </div>
                         <div id="loading" class="loading">
                             <div class="spinner-border text-primary" role="status">
                                 <span class="visually-hidden">Loading...</span>
@@ -267,6 +406,13 @@ with open('templates/index.html', 'w') as f:
                         
                         if (response.updated_at) {
                             $('#lastUpdated').text('Last updated: ' + response.updated_at);
+                        }
+                        
+                        // Show sample data notice if needed
+                        if (response.is_sample) {
+                            $('#sampleDataNotice').show();
+                        } else {
+                            $('#sampleDataNotice').hide();
                         }
                         
                         const tableBody = $('#tableBody');
@@ -328,13 +474,20 @@ def scheduled_update():
     while True:
         logger.info("Running scheduled update")
         df = fetch_chartink_data()
-        if df is not None:
-            cached_data['data'] = df
-            cached_data['timestamp'] = time.time()
+        
+        # If real data couldn't be fetched, use sample data
+        if df is None:
+            logger.warning("Using sample data for scheduled update")
+            df = generate_sample_data()
             
-            # Send update to Telegram
-            message = format_telegram_message(df)
-            send_to_telegram(message)
+        cached_data['data'] = df
+        cached_data['timestamp'] = time.time()
+        
+        # Send update to Telegram
+        is_sample = df is not None and len(df) <= 15  # Simple check for sample data
+        prefix = "⚠️ SAMPLE DATA: " if is_sample else ""
+        message = prefix + format_telegram_message(df)
+        send_to_telegram(message)
         
         # Sleep for 1 hour
         time.sleep(3600)  # 1 hour = 3600 seconds
