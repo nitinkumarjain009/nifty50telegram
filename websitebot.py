@@ -646,6 +646,374 @@ async def handle_command_analyze(update: Update, context: ContextTypes.DEFAULT_T
 
     # Calculate indicators and get recommendations    
     stock_data = calculate_indicators(stock_data)
+    # Add these functions after calculate_indicators but before get_recommendations
+
+def fetch_timeframe_data(symbol, timeframe='daily'):
+    """Fetch stock data for specific timeframe (daily, weekly, monthly)"""
+    try:
+        # Simulating data for different timeframes
+        # In a real implementation, you would fetch actual data from an API
+        
+        if timeframe == 'weekly':
+            periods = 52  # One year of weekly data
+            freq = 'W'
+        elif timeframe == 'monthly':
+            periods = 24  # Two years of monthly data
+            freq = 'M'
+        else:  # daily
+            periods = 100
+            freq = 'D'
+        
+        # Create sample data with the appropriate frequency
+        hist_data = pd.DataFrame({
+            'date': pd.date_range(end=datetime.datetime.now(), periods=periods, freq=freq),
+            'open': np.random.normal(500, 10, periods),
+            'high': np.random.normal(505, 15, periods),
+            'low': np.random.normal(495, 15, periods),
+            'close': np.random.normal(500, 10, periods),
+            'volume': np.random.normal(1000000, 200000, periods)
+        })
+        
+        # Make sure high is the highest and low is the lowest for each period
+        for i in range(len(hist_data)):
+            values = [hist_data.loc[i, 'open'], hist_data.loc[i, 'close']]
+            hist_data.loc[i, 'high'] = max(values) + abs(np.random.normal(0, 2))
+            hist_data.loc[i, 'low'] = min(values) - abs(np.random.normal(0, 2))
+        
+        hist_data['symbol'] = symbol
+        return hist_data
+    except Exception as e:
+        print(f"Error fetching {timeframe} data for {symbol}: {e}")
+        return pd.DataFrame()
+
+def generate_timeframe_analysis(timeframe):
+    """Generate analysis for weekly or monthly timeframes"""
+    stocks_df = load_stock_data()
+    
+    if stocks_df.empty:
+        return {}
+    
+    # Categories for RSI-based classification
+    rsi_categories = {
+        'oversold': {'min': 0, 'max': 30},
+        'neutral_low': {'min': 30, 'max': 45},
+        'neutral': {'min': 45, 'max': 55},
+        'neutral_high': {'min': 55, 'max': 70},
+        'overbought': {'min': 70, 'max': 100}
+    }
+    
+    categorized_stocks = {category: [] for category in rsi_categories}
+    
+    # Process each stock
+    for _, row in stocks_df.iterrows():
+        symbol = row['symbol']
+        
+        # Fetch data for the specified timeframe
+        stock_data = fetch_timeframe_data(symbol, timeframe)
+        
+        if stock_data.empty:
+            continue
+            
+        # Calculate indicators
+        stock_data = calculate_indicators(stock_data)
+        
+        # Get latest data point
+        latest = stock_data.iloc[-1]
+        
+        # Determine RSI category
+        rsi_value = latest['RSI']
+        rsi_category = None
+        
+        for category, range_val in rsi_categories.items():
+            if range_val['min'] <= rsi_value < range_val['max']:
+                rsi_category = category
+                break
+        
+        if rsi_category is None:
+            continue
+        
+        # Get overall recommendation
+        recommendations = get_recommendations(stock_data, symbol)
+        overall_rec = recommendations.get('recommendations', {}).get('OVERALL', 'HOLD')
+        
+        # Add to appropriate category
+        categorized_stocks[rsi_category].append({
+            'symbol': symbol,
+            'price': round(latest['close'], 2),
+            'rsi': round(rsi_value, 2),
+            'adx': round(latest['ADX'], 2),
+            'recommendation': overall_rec
+        })
+    
+    # Sort stocks within each category by RSI
+    for category in categorized_stocks:
+        categorized_stocks[category].sort(key=lambda x: x['rsi'])
+    
+    return {
+        'timeframe': timeframe,
+        'timestamp': datetime.datetime.now(IST_TIMEZONE).strftime('%Y-%m-%d %H:%M:%S'),
+        'categories': categorized_stocks
+    }
+
+# Add these Flask routes after the existing ones
+
+@app.route('/weekly')
+def weekly_analysis():
+    """Page for weekly timeframe analysis"""
+    return render_template('timeframe_analysis.html', 
+                          timeframe='Weekly',
+                          market_status=is_market_hours(),
+                          last_update=last_update_time)
+
+@app.route('/monthly')
+def monthly_analysis():
+    """Page for monthly timeframe analysis"""
+    return render_template('timeframe_analysis.html', 
+                          timeframe='Monthly',
+                          market_status=is_market_hours(),
+                          last_update=last_update_time)
+
+@app.route('/api/weekly')
+def api_weekly():
+    """API endpoint for weekly analysis"""
+    weekly_data = generate_timeframe_analysis('weekly')
+    return jsonify(weekly_data)
+
+@app.route('/api/monthly')
+def api_monthly():
+    """API endpoint for monthly analysis"""
+    monthly_data = generate_timeframe_analysis('monthly')
+    return jsonify(monthly_data)
+
+# Now add this to the ensure_directories function to create the new template
+
+def ensure_directories():
+    """Ensure all required directories exist"""
+    os.makedirs('static', exist_ok=True)
+    os.makedirs(TEMPLATES_DIR, exist_ok=True)
+    
+    # Create timeframe analysis template
+    if not os.path.exists(f"{TEMPLATES_DIR}/timeframe_analysis.html"):
+        with open(f"{TEMPLATES_DIR}/timeframe_analysis.html", "w") as f:
+            f.write("""
+<!DOCTYPE html>
+<html>
+<head>
+    <title>{{ timeframe }} Analysis - Nifty 50 Stock Analyzer</title>
+    <meta charset="UTF-8">
+    <meta name="viewport" content="width=device-width, initial-scale=1.0">
+    <link href="https://cdn.jsdelivr.net/npm/bootstrap@5.3.0-alpha1/dist/css/bootstrap.min.css" rel="stylesheet">
+    <style>
+        body { padding-top: 20px; }
+        .card { margin-bottom: 20px; }
+        .oversold { border-left: 5px solid green; }
+        .neutral_low { border-left: 5px solid lightgreen; }
+        .neutral { border-left: 5px solid gray; }
+        .neutral_high { border-left: 5px solid orange; }
+        .overbought { border-left: 5px solid red; }
+        .buy-rec { color: green; font-weight: bold; }
+        .sell-rec { color: red; font-weight: bold; }
+        .hold-rec { color: gray; }
+    </style>
+</head>
+<body>
+    <div class="container">
+        <h1 class="text-center mb-4">{{ timeframe }} Analysis - Nifty 50 Stocks</h1>
+        
+        <div class="row mb-4">
+            <div class="col-md-6">
+                <div class="card">
+                    <div class="card-header">
+                        <h5>Market Status</h5>
+                    </div>
+                    <div class="card-body">
+                        <p><strong>Market is:</strong> <span id="market-status" class="badge bg-success">Loading...</span></p>
+                        <p><strong>Last Update:</strong> <span id="last-update">Loading...</span></p>
+                    </div>
+                </div>
+            </div>
+            
+            <div class="col-md-6">
+                <div class="card">
+                    <div class="card-header">
+                        <h5>Navigation</h5>
+                    </div>
+                    <div class="card-body">
+                        <a href="/" class="btn btn-primary">Daily Analysis</a>
+                        <a href="/weekly" class="btn btn-secondary">Weekly Analysis</a>
+                        <a href="/monthly" class="btn btn-info">Monthly Analysis</a>
+                    </div>
+                </div>
+            </div>
+        </div>
+        
+        <div id="loading">
+            <div class="d-flex justify-content-center">
+                <div class="spinner-border text-primary" role="status">
+                    <span class="visually-hidden">Loading...</span>
+                </div>
+            </div>
+            <p class="text-center">Loading {{ timeframe }} analysis data...</p>
+        </div>
+        
+        <div id="analysis-content" style="display: none;">
+            <h3>RSI-Based Stock Categories</h3>
+            <p class="text-muted">Last updated: <span id="timestamp">Loading...</span></p>
+            
+            <div class="accordion" id="accordionRSI">
+                <!-- RSI Categories will be dynamically inserted here -->
+            </div>
+        </div>
+    </div>
+    
+    <script src="https://cdn.jsdelivr.net/npm/bootstrap@5.3.0-alpha1/dist/js/bootstrap.bundle.min.js"></script>
+    <script>
+        // Update market status on page load
+        document.addEventListener('DOMContentLoaded', function() {
+            // Set market status
+            const marketStatus = {{ 'true' if market_status else 'false' }};
+            const statusEl = document.getElementById('market-status');
+            
+            if (marketStatus) {
+                statusEl.textContent = 'OPEN';
+                statusEl.className = 'badge bg-success';
+            } else {
+                statusEl.textContent = 'CLOSED';
+                statusEl.className = 'badge bg-danger';
+            }
+            
+            // Set last update time
+            const lastUpdate = "{{ last_update or 'Not available' }}";
+            document.getElementById('last-update').textContent = lastUpdate;
+            
+            // Load timeframe analysis
+            fetchTimeframeData('{{ timeframe.lower() }}');
+        });
+        
+        function fetchTimeframeData(timeframe) {
+            fetch(`/api/${timeframe}`)
+                .then(response => response.json())
+                .then(data => {
+                    document.getElementById('loading').style.display = 'none';
+                    document.getElementById('analysis-content').style.display = 'block';
+                    
+                    document.getElementById('timestamp').textContent = data.timestamp;
+                    
+                    const accordion = document.getElementById('accordionRSI');
+                    accordion.innerHTML = '';
+                    
+                    // Category labels and descriptions
+                    const categoryLabels = {
+                        'oversold': {
+                            'title': 'Oversold (RSI below 30)',
+                            'description': 'Potentially undervalued stocks with RSI below 30. These may present buying opportunities.',
+                            'expanded': true
+                        },
+                        'neutral_low': {
+                            'title': 'Neutral-Low (RSI 30-45)',
+                            'description': 'Stocks with RSI between 30-45. These are moving from oversold conditions toward neutral.',
+                            'expanded': false
+                        },
+                        'neutral': {
+                            'title': 'Neutral (RSI 45-55)',
+                            'description': 'Stocks with RSI between 45-55. These are in a balanced state without strong momentum either way.',
+                            'expanded': false
+                        },
+                        'neutral_high': {
+                            'title': 'Neutral-High (RSI 55-70)',
+                            'description': 'Stocks with RSI between 55-70. These show upward momentum but aren\'t yet overbought.',
+                            'expanded': false
+                        },
+                        'overbought': {
+                            'title': 'Overbought (RSI above 70)',
+                            'description': 'Potentially overvalued stocks with RSI above 70. These may present selling opportunities.',
+                            'expanded': true
+                        }
+                    };
+                    
+                    // Process each RSI category
+                    Object.entries(data.categories).forEach(([category, stocks], index) => {
+                        if (!stocks.length) return;
+                        
+                        const categoryInfo = categoryLabels[category] || {
+                            'title': `${category} RSI`,
+                            'description': `Stocks classified in the ${category} RSI range.`,
+                            'expanded': false
+                        };
+                        
+                        const accordionItem = document.createElement('div');
+                        accordionItem.className = 'accordion-item';
+                        
+                        const headerId = `heading${category}`;
+                        const collapseId = `collapse${category}`;
+                        
+                        accordionItem.innerHTML = `
+                            <h2 class="accordion-header" id="${headerId}">
+                                <button class="accordion-button ${categoryInfo.expanded ? '' : 'collapsed'}" type="button" 
+                                    data-bs-toggle="collapse" data-bs-target="#${collapseId}" 
+                                    aria-expanded="${categoryInfo.expanded ? 'true' : 'false'}" aria-controls="${collapseId}">
+                                    ${categoryInfo.title} (${stocks.length} stocks)
+                                </button>
+                            </h2>
+                            <div id="${collapseId}" class="accordion-collapse collapse ${categoryInfo.expanded ? 'show' : ''}" 
+                                aria-labelledby="${headerId}" data-bs-parent="#accordionRSI">
+                                <div class="accordion-body">
+                                    <p class="mb-3">${categoryInfo.description}</p>
+                                    <div class="table-responsive">
+                                        <table class="table table-striped table-hover">
+                                            <thead>
+                                                <tr>
+                                                    <th>Symbol</th>
+                                                    <th>CMP (₹)</th>
+                                                    <th>RSI</th>
+                                                    <th>ADX</th>
+                                                    <th>Recommendation</th>
+                                                </tr>
+                                            </thead>
+                                            <tbody id="tbody-${category}">
+                                            </tbody>
+                                        </table>
+                                    </div>
+                                </div>
+                            </div>
+                        `;
+                        
+                        accordion.appendChild(accordionItem);
+                        
+                        // Add stocks to the table
+                        const tbody = document.getElementById(`tbody-${category}`);
+                        stocks.forEach(stock => {
+                            const tr = document.createElement('tr');
+                            
+                            // Add recommendation class
+                            let recClass = 'hold-rec';
+                            if (stock.recommendation === 'BUY') recClass = 'buy-rec';
+                            else if (stock.recommendation === 'SELL') recClass = 'sell-rec';
+                            
+                            tr.innerHTML = `
+                                <td>${stock.symbol}</td>
+                                <td>₹${stock.price}</td>
+                                <td>${stock.rsi}</td>
+                                <td>${stock.adx}</td>
+                                <td class="${recClass}">${stock.recommendation}</td>
+                            `;
+                            
+                            tbody.appendChild(tr);
+                        });
+                    });
+                })
+                .catch(error => {
+                    console.error(`Error fetching ${timeframe} data:`, error);
+                    document.getElementById('loading').style.display = 'none';
+                    document.getElementById('analysis-content').style.display = 'block';
+                    document.getElementById('accordionRSI').innerHTML = 
+                        `<div class="alert alert-danger">Error loading ${timeframe} analysis data. Please try again later.</div>`;
+                });
+        }
+    </script>
+</body>
+</html>
+            """)
     recommendations = get_recommendations_with_targets(stock_data, symbol)
     
     # Format and send the analysis
@@ -735,6 +1103,374 @@ def api_analyze(symbol):
     
     # Calculate indicators and get recommendations
     stock_data = calculate_indicators(stock_data)
+    # Add these functions after calculate_indicators but before get_recommendations
+
+def fetch_timeframe_data(symbol, timeframe='daily'):
+    """Fetch stock data for specific timeframe (daily, weekly, monthly)"""
+    try:
+        # Simulating data for different timeframes
+        # In a real implementation, you would fetch actual data from an API
+        
+        if timeframe == 'weekly':
+            periods = 52  # One year of weekly data
+            freq = 'W'
+        elif timeframe == 'monthly':
+            periods = 24  # Two years of monthly data
+            freq = 'M'
+        else:  # daily
+            periods = 100
+            freq = 'D'
+        
+        # Create sample data with the appropriate frequency
+        hist_data = pd.DataFrame({
+            'date': pd.date_range(end=datetime.datetime.now(), periods=periods, freq=freq),
+            'open': np.random.normal(500, 10, periods),
+            'high': np.random.normal(505, 15, periods),
+            'low': np.random.normal(495, 15, periods),
+            'close': np.random.normal(500, 10, periods),
+            'volume': np.random.normal(1000000, 200000, periods)
+        })
+        
+        # Make sure high is the highest and low is the lowest for each period
+        for i in range(len(hist_data)):
+            values = [hist_data.loc[i, 'open'], hist_data.loc[i, 'close']]
+            hist_data.loc[i, 'high'] = max(values) + abs(np.random.normal(0, 2))
+            hist_data.loc[i, 'low'] = min(values) - abs(np.random.normal(0, 2))
+        
+        hist_data['symbol'] = symbol
+        return hist_data
+    except Exception as e:
+        print(f"Error fetching {timeframe} data for {symbol}: {e}")
+        return pd.DataFrame()
+
+def generate_timeframe_analysis(timeframe):
+    """Generate analysis for weekly or monthly timeframes"""
+    stocks_df = load_stock_data()
+    
+    if stocks_df.empty:
+        return {}
+    
+    # Categories for RSI-based classification
+    rsi_categories = {
+        'oversold': {'min': 0, 'max': 30},
+        'neutral_low': {'min': 30, 'max': 45},
+        'neutral': {'min': 45, 'max': 55},
+        'neutral_high': {'min': 55, 'max': 70},
+        'overbought': {'min': 70, 'max': 100}
+    }
+    
+    categorized_stocks = {category: [] for category in rsi_categories}
+    
+    # Process each stock
+    for _, row in stocks_df.iterrows():
+        symbol = row['symbol']
+        
+        # Fetch data for the specified timeframe
+        stock_data = fetch_timeframe_data(symbol, timeframe)
+        
+        if stock_data.empty:
+            continue
+            
+        # Calculate indicators
+        stock_data = calculate_indicators(stock_data)
+        
+        # Get latest data point
+        latest = stock_data.iloc[-1]
+        
+        # Determine RSI category
+        rsi_value = latest['RSI']
+        rsi_category = None
+        
+        for category, range_val in rsi_categories.items():
+            if range_val['min'] <= rsi_value < range_val['max']:
+                rsi_category = category
+                break
+        
+        if rsi_category is None:
+            continue
+        
+        # Get overall recommendation
+        recommendations = get_recommendations(stock_data, symbol)
+        overall_rec = recommendations.get('recommendations', {}).get('OVERALL', 'HOLD')
+        
+        # Add to appropriate category
+        categorized_stocks[rsi_category].append({
+            'symbol': symbol,
+            'price': round(latest['close'], 2),
+            'rsi': round(rsi_value, 2),
+            'adx': round(latest['ADX'], 2),
+            'recommendation': overall_rec
+        })
+    
+    # Sort stocks within each category by RSI
+    for category in categorized_stocks:
+        categorized_stocks[category].sort(key=lambda x: x['rsi'])
+    
+    return {
+        'timeframe': timeframe,
+        'timestamp': datetime.datetime.now(IST_TIMEZONE).strftime('%Y-%m-%d %H:%M:%S'),
+        'categories': categorized_stocks
+    }
+
+# Add these Flask routes after the existing ones
+
+@app.route('/weekly')
+def weekly_analysis():
+    """Page for weekly timeframe analysis"""
+    return render_template('timeframe_analysis.html', 
+                          timeframe='Weekly',
+                          market_status=is_market_hours(),
+                          last_update=last_update_time)
+
+@app.route('/monthly')
+def monthly_analysis():
+    """Page for monthly timeframe analysis"""
+    return render_template('timeframe_analysis.html', 
+                          timeframe='Monthly',
+                          market_status=is_market_hours(),
+                          last_update=last_update_time)
+
+@app.route('/api/weekly')
+def api_weekly():
+    """API endpoint for weekly analysis"""
+    weekly_data = generate_timeframe_analysis('weekly')
+    return jsonify(weekly_data)
+
+@app.route('/api/monthly')
+def api_monthly():
+    """API endpoint for monthly analysis"""
+    monthly_data = generate_timeframe_analysis('monthly')
+    return jsonify(monthly_data)
+
+# Now add this to the ensure_directories function to create the new template
+
+def ensure_directories():
+    """Ensure all required directories exist"""
+    os.makedirs('static', exist_ok=True)
+    os.makedirs(TEMPLATES_DIR, exist_ok=True)
+    
+    # Create timeframe analysis template
+    if not os.path.exists(f"{TEMPLATES_DIR}/timeframe_analysis.html"):
+        with open(f"{TEMPLATES_DIR}/timeframe_analysis.html", "w") as f:
+            f.write("""
+<!DOCTYPE html>
+<html>
+<head>
+    <title>{{ timeframe }} Analysis - Nifty 50 Stock Analyzer</title>
+    <meta charset="UTF-8">
+    <meta name="viewport" content="width=device-width, initial-scale=1.0">
+    <link href="https://cdn.jsdelivr.net/npm/bootstrap@5.3.0-alpha1/dist/css/bootstrap.min.css" rel="stylesheet">
+    <style>
+        body { padding-top: 20px; }
+        .card { margin-bottom: 20px; }
+        .oversold { border-left: 5px solid green; }
+        .neutral_low { border-left: 5px solid lightgreen; }
+        .neutral { border-left: 5px solid gray; }
+        .neutral_high { border-left: 5px solid orange; }
+        .overbought { border-left: 5px solid red; }
+        .buy-rec { color: green; font-weight: bold; }
+        .sell-rec { color: red; font-weight: bold; }
+        .hold-rec { color: gray; }
+    </style>
+</head>
+<body>
+    <div class="container">
+        <h1 class="text-center mb-4">{{ timeframe }} Analysis - Nifty 50 Stocks</h1>
+        
+        <div class="row mb-4">
+            <div class="col-md-6">
+                <div class="card">
+                    <div class="card-header">
+                        <h5>Market Status</h5>
+                    </div>
+                    <div class="card-body">
+                        <p><strong>Market is:</strong> <span id="market-status" class="badge bg-success">Loading...</span></p>
+                        <p><strong>Last Update:</strong> <span id="last-update">Loading...</span></p>
+                    </div>
+                </div>
+            </div>
+            
+            <div class="col-md-6">
+                <div class="card">
+                    <div class="card-header">
+                        <h5>Navigation</h5>
+                    </div>
+                    <div class="card-body">
+                        <a href="/" class="btn btn-primary">Daily Analysis</a>
+                        <a href="/weekly" class="btn btn-secondary">Weekly Analysis</a>
+                        <a href="/monthly" class="btn btn-info">Monthly Analysis</a>
+                    </div>
+                </div>
+            </div>
+        </div>
+        
+        <div id="loading">
+            <div class="d-flex justify-content-center">
+                <div class="spinner-border text-primary" role="status">
+                    <span class="visually-hidden">Loading...</span>
+                </div>
+            </div>
+            <p class="text-center">Loading {{ timeframe }} analysis data...</p>
+        </div>
+        
+        <div id="analysis-content" style="display: none;">
+            <h3>RSI-Based Stock Categories</h3>
+            <p class="text-muted">Last updated: <span id="timestamp">Loading...</span></p>
+            
+            <div class="accordion" id="accordionRSI">
+                <!-- RSI Categories will be dynamically inserted here -->
+            </div>
+        </div>
+    </div>
+    
+    <script src="https://cdn.jsdelivr.net/npm/bootstrap@5.3.0-alpha1/dist/js/bootstrap.bundle.min.js"></script>
+    <script>
+        // Update market status on page load
+        document.addEventListener('DOMContentLoaded', function() {
+            // Set market status
+            const marketStatus = {{ 'true' if market_status else 'false' }};
+            const statusEl = document.getElementById('market-status');
+            
+            if (marketStatus) {
+                statusEl.textContent = 'OPEN';
+                statusEl.className = 'badge bg-success';
+            } else {
+                statusEl.textContent = 'CLOSED';
+                statusEl.className = 'badge bg-danger';
+            }
+            
+            // Set last update time
+            const lastUpdate = "{{ last_update or 'Not available' }}";
+            document.getElementById('last-update').textContent = lastUpdate;
+            
+            // Load timeframe analysis
+            fetchTimeframeData('{{ timeframe.lower() }}');
+        });
+        
+        function fetchTimeframeData(timeframe) {
+            fetch(`/api/${timeframe}`)
+                .then(response => response.json())
+                .then(data => {
+                    document.getElementById('loading').style.display = 'none';
+                    document.getElementById('analysis-content').style.display = 'block';
+                    
+                    document.getElementById('timestamp').textContent = data.timestamp;
+                    
+                    const accordion = document.getElementById('accordionRSI');
+                    accordion.innerHTML = '';
+                    
+                    // Category labels and descriptions
+                    const categoryLabels = {
+                        'oversold': {
+                            'title': 'Oversold (RSI below 30)',
+                            'description': 'Potentially undervalued stocks with RSI below 30. These may present buying opportunities.',
+                            'expanded': true
+                        },
+                        'neutral_low': {
+                            'title': 'Neutral-Low (RSI 30-45)',
+                            'description': 'Stocks with RSI between 30-45. These are moving from oversold conditions toward neutral.',
+                            'expanded': false
+                        },
+                        'neutral': {
+                            'title': 'Neutral (RSI 45-55)',
+                            'description': 'Stocks with RSI between 45-55. These are in a balanced state without strong momentum either way.',
+                            'expanded': false
+                        },
+                        'neutral_high': {
+                            'title': 'Neutral-High (RSI 55-70)',
+                            'description': 'Stocks with RSI between 55-70. These show upward momentum but aren\'t yet overbought.',
+                            'expanded': false
+                        },
+                        'overbought': {
+                            'title': 'Overbought (RSI above 70)',
+                            'description': 'Potentially overvalued stocks with RSI above 70. These may present selling opportunities.',
+                            'expanded': true
+                        }
+                    };
+                    
+                    // Process each RSI category
+                    Object.entries(data.categories).forEach(([category, stocks], index) => {
+                        if (!stocks.length) return;
+                        
+                        const categoryInfo = categoryLabels[category] || {
+                            'title': `${category} RSI`,
+                            'description': `Stocks classified in the ${category} RSI range.`,
+                            'expanded': false
+                        };
+                        
+                        const accordionItem = document.createElement('div');
+                        accordionItem.className = 'accordion-item';
+                        
+                        const headerId = `heading${category}`;
+                        const collapseId = `collapse${category}`;
+                        
+                        accordionItem.innerHTML = `
+                            <h2 class="accordion-header" id="${headerId}">
+                                <button class="accordion-button ${categoryInfo.expanded ? '' : 'collapsed'}" type="button" 
+                                    data-bs-toggle="collapse" data-bs-target="#${collapseId}" 
+                                    aria-expanded="${categoryInfo.expanded ? 'true' : 'false'}" aria-controls="${collapseId}">
+                                    ${categoryInfo.title} (${stocks.length} stocks)
+                                </button>
+                            </h2>
+                            <div id="${collapseId}" class="accordion-collapse collapse ${categoryInfo.expanded ? 'show' : ''}" 
+                                aria-labelledby="${headerId}" data-bs-parent="#accordionRSI">
+                                <div class="accordion-body">
+                                    <p class="mb-3">${categoryInfo.description}</p>
+                                    <div class="table-responsive">
+                                        <table class="table table-striped table-hover">
+                                            <thead>
+                                                <tr>
+                                                    <th>Symbol</th>
+                                                    <th>CMP (₹)</th>
+                                                    <th>RSI</th>
+                                                    <th>ADX</th>
+                                                    <th>Recommendation</th>
+                                                </tr>
+                                            </thead>
+                                            <tbody id="tbody-${category}">
+                                            </tbody>
+                                        </table>
+                                    </div>
+                                </div>
+                            </div>
+                        `;
+                        
+                        accordion.appendChild(accordionItem);
+                        
+                        // Add stocks to the table
+                        const tbody = document.getElementById(`tbody-${category}`);
+                        stocks.forEach(stock => {
+                            const tr = document.createElement('tr');
+                            
+                            // Add recommendation class
+                            let recClass = 'hold-rec';
+                            if (stock.recommendation === 'BUY') recClass = 'buy-rec';
+                            else if (stock.recommendation === 'SELL') recClass = 'sell-rec';
+                            
+                            tr.innerHTML = `
+                                <td>${stock.symbol}</td>
+                                <td>₹${stock.price}</td>
+                                <td>${stock.rsi}</td>
+                                <td>${stock.adx}</td>
+                                <td class="${recClass}">${stock.recommendation}</td>
+                            `;
+                            
+                            tbody.appendChild(tr);
+                        });
+                    });
+                })
+                .catch(error => {
+                    console.error(`Error fetching ${timeframe} data:`, error);
+                    document.getElementById('loading').style.display = 'none';
+                    document.getElementById('analysis-content').style.display = 'block';
+                    document.getElementById('accordionRSI').innerHTML = 
+                        `<div class="alert alert-danger">Error loading ${timeframe} analysis data. Please try again later.</div>`;
+                });
+        }
+    </script>
+</body>
+</html>
+            """)
     recommendations = get_recommendations_with_targets(stock_data, symbol)
     
     return jsonify(recommendations)
@@ -817,6 +1553,21 @@ async def main():
                     <div class="card-header">
                         <h5>Stock Analysis</h5>
                     </div>
+                    <!-- Add this after the stock analysis card (around line 69 in your code) -->
+    <div class="col-md-12 mt-3">
+    <div class="card mb-4">
+        <div class="card-header">
+            <h5>Analysis Timeframes</h5>
+        </div>
+        <div class="card-body">
+            <div class="btn-group" role="group" aria-label="Timeframe selection">
+                <a href="/" class="btn btn-primary">Daily Analysis</a>
+                <a href="/weekly" class="btn btn-secondary">Weekly Analysis</a>
+                <a href="/monthly" class="btn btn-info">Monthly Analysis</a>
+            </div>
+        </div>
+    </div>
+    </div>
                     <div class="card-body">
                         <div class="input-group mb-3">
                             <input type="text" id="symbol-input" class="form-control" placeholder="Enter stock symbol (e.g., RELIANCE)">
