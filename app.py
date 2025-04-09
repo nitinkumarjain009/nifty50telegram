@@ -31,9 +31,9 @@ app = Flask(__name__)
 
 # --- Constants ---
 STOCK_LIST_FILE = 'nifty50_stocks.csv'
-DATA_FETCH_PERIOD = "1y" # Fetch 1 year of data for indicator calculation
-BACKTEST_SYMBOL = "RELIANCE.NS" # Stock to run backtest example on
-BACKTEST_PERIOD = "2y" # Historical data period for backtesting
+DATA_FETCH_PERIOD = "6mo" # Fetch 1 year of data for indicator calculation
+BACKTEST_SYMBOL = "BSE.NS" # Stock to run backtest example on
+BACKTEST_PERIOD = "1y" # Historical data period for backtesting
 
 # --- Helper Function ---
 def get_stock_symbols():
@@ -53,7 +53,7 @@ def get_stock_symbols():
         logging.error(f"Error reading {STOCK_LIST_FILE}: {e}")
         return []
 
-def fetch_stock_data(symbols, period="1y"):
+def fetch_stock_data(symbols, period="6mo"):
     """Fetches historical data for a list of symbols using yfinance."""
     if not symbols:
         return pd.DataFrame()
