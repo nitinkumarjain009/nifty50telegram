@@ -673,8 +673,8 @@ class ChartInkScraper:
         
         return rec_type
     
-   def save_recommendations(self):
-    """Save recommendations to database and return new ones"""
+def save_recommendations(self):
+     """Save recommendations to database and return new ones"""
     new_recommendations = []
     conn = sqlite3.connect('recommendations.db')
     cursor = conn.cursor()
