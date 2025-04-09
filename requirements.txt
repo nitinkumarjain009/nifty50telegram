@@ -21,4 +21,6 @@ tabulate
 plotly==5.15.0
 kaleido==0.2.1  # Required for plotly.io.write_image
 waitress
+dataframe_image>=0.1.5
+matplotlib>=3.5.0 # Required by dataframe_image for table conversion
 
