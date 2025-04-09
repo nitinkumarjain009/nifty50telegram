@@ -342,4 +342,4 @@ def send_to_telegram(message):
         }
         response = requests.post(api_url, data=payload, timeout=10)
         response.raise_for_status()
-        logger.info("Message sent to Telegram successfully
+        logger.info("Message sent to Telegram successfully")
