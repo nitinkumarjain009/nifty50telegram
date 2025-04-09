@@ -574,7 +574,7 @@ def send_telegram_message(message):
         return False
     
     try:
-        bot.send_message(chat_id=TELEGRAM_CHAT_ID, text=message, parse_mode='HTML')
+        bot.send_message(chat_id=@Stockniftybot, text=message, parse_mode='HTML')
         return True
     except TelegramError as e:
         logger.error(f"Failed to send Telegram message: {e}")
