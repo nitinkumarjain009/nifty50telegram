@@ -33,7 +33,7 @@ app = Flask(__name__)
 STOCK_LIST_FILE = 'nifty50_stocks.csv'
 DATA_FETCH_PERIOD = "6mo" # Fetch 1 year of data for indicator calculation
 BACKTEST_SYMBOL = "BSE.NS" # Stock to run backtest example on
-BACKTEST_PERIOD = "1y" # Historical data period for backtesting
+BACKTEST_PERIOD = "3mo" # Historical data period for backtesting
 
 # --- Helper Function ---
 def get_stock_symbols():
