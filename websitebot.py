@@ -712,7 +712,16 @@ def daily_analysis():
         db.session.commit()
         
         message_parts.append("\nNext scan will be performed at 9:15 AM on the next trading day.")
-        
+
+# Add this before line 717
+message_parts = []
+# Add your message parts here
+message_parts.append("First message part")
+message_parts.append("Second message part")
+# etc.
+
+# Then join them
+message = "\n".join(message_parts)       
        # Send Telegram message
 message = "\n".join(message_parts)
 send_telegram_message(message)
