@@ -14,8 +14,10 @@ import plotly.io as pio
 from plotly.subplots import make_subplots
 import warnings
 warnings.filterwarnings('ignore')
-from telegram import Bot, Update
 
+# For python-telegram-bot v20+
+from telegram import Bot, Update
+from telegram.ext import Application, CommandHandler, MessageHandler, ContextTypes, filters
 
 # Configuration
 TELEGRAM_BOT_TOKEN = "YOUR_TELEGRAM_BOT_TOKEN"
@@ -32,22 +34,8 @@ IST_TIMEZONE = pytz.timezone('Asia/Kolkata')
 app = Flask(__name__, template_folder=TEMPLATES_DIR)
 app.config['JSON_SORT_KEYS'] = False
 
-from telegram import Bot
-from telegram.ext import Updater, Dispatcher
-
-TELEGRAM_BOT_TOKEN = "YOUR_TELEGRAM_BOT_TOKEN"
-
 # Initialize the Bot instance
 bot = Bot(TELEGRAM_BOT_TOKEN)
-
-# Initialize the Updater with the bot token
-updater = Updater(TELEGRAM_BOT_TOKEN, use_context=True)
-
-# Get the Dispatcher from the Updater instance
-dispatcher = updater.dispatcher
-
-# Bot is now ready for configuration
-print("Bot initialized successfully!")
 
 # Global variables to store recommendations and analysis
 current_recommendations = {}
@@ -357,41 +345,41 @@ def create_technical_chart(df, symbol):
         print(f"Error creating chart for {symbol}: {e}")
         return None
 
-def send_telegram_message(message, target=None):
+async def send_telegram_message(message, target=None):
     """Send a message to Telegram channel or group"""
     try:
         if target is None:
             # Send to personal chat ID
-            bot.send_message(chat_id=TELEGRAM_CHAT_ID, text=message, parse_mode='Markdown')
+            await bot.send_message(chat_id=TELEGRAM_CHAT_ID, text=message, parse_mode='Markdown')
             print(f"Message sent to Telegram chat: {message[:50]}...")
             
             # Also send to group
-            bot.send_message(chat_id=TELEGRAM_GROUP, text=message, parse_mode='Markdown')
+            await bot.send_message(chat_id=TELEGRAM_GROUP, text=message, parse_mode='Markdown')
             print(f"Message sent to Telegram group {TELEGRAM_GROUP}: {message[:50]}...")
         else:
             # Send to specified target
-            bot.send_message(chat_id=target, text=message, parse_mode='Markdown')
+            await bot.send_message(chat_id=target, text=message, parse_mode='Markdown')
             print(f"Message sent to Telegram {target}: {message[:50]}...")
     except Exception as e:
         print(f"Error sending Telegram message: {e}")
 
-def send_telegram_photo(photo_path, caption, target=None):
+async def send_telegram_photo(photo_path, caption, target=None):
     """Send a photo to Telegram channel or group"""
     try:
         if target is None:
             # Send to personal chat ID
             with open(photo_path, 'rb') as photo:
-                bot.send_photo(chat_id=TELEGRAM_CHAT_ID, photo=photo, caption=caption)
+                await bot.send_photo(chat_id=TELEGRAM_CHAT_ID, photo=photo, caption=caption)
             print(f"Photo sent to Telegram chat: {caption[:50]}...")
             
             # Also send to group
             with open(photo_path, 'rb') as photo:
-                bot.send_photo(chat_id=TELEGRAM_GROUP, photo=photo, caption=caption)
+                await bot.send_photo(chat_id=TELEGRAM_GROUP, photo=photo, caption=caption)
             print(f"Photo sent to Telegram group {TELEGRAM_GROUP}: {caption[:50]}...")
         else:
             # Send to specified target
             with open(photo_path, 'rb') as photo:
-                bot.send_photo(chat_id=target, photo=photo, caption=caption)
+                await bot.send_photo(chat_id=target, photo=photo, caption=caption)
             print(f"Photo sent to Telegram {target}: {caption[:50]}...")
     except Exception as e:
         print(f"Error sending Telegram photo: {e}")
@@ -415,7 +403,7 @@ def format_recommendations_message(recommendations):
     
     return msg
 
-def run_analysis():
+async def run_analysis():
     """Run analysis on all stocks and send recommendations"""
     global current_recommendations, last_update_time
     
@@ -424,7 +412,7 @@ def run_analysis():
     
     if stocks_df.empty:
         message = "❌ Error: Could not load stock data."
-        send_telegram_message(message)
+        await send_telegram_message(message)
         return
     
     print(f"Running analysis at {datetime.datetime.now(IST_TIMEZONE).strftime('%Y-%m-%d %H:%M:%S')}")
@@ -450,14 +438,14 @@ def run_analysis():
         # If it's a significant recommendation (BUY or SELL), send individual notification
         if recommendations.get('recommendations', {}).get('OVERALL') in ['BUY', 'SELL']:
             message = format_recommendations_message(recommendations)
-            send_telegram_message(message)
+            await send_telegram_message(message)
             
             # Create and save chart
             fig = create_technical_chart(stock_data, symbol)
             if fig:
                 chart_path = f"static/{symbol}_chart.png"
                 pio.write_image(fig, chart_path)
-                send_telegram_photo(chart_path, f"Technical chart for {symbol}")
+                await send_telegram_photo(chart_path, f"Technical chart for {symbol}")
     
     # Update global recommendations
     current_recommendations = all_recommendations
@@ -465,7 +453,7 @@ def run_analysis():
     
     return all_recommendations
 
-def generate_daily_analysis():
+async def generate_daily_analysis():
     """Generate daily analysis after market hours"""
     global daily_analysis
     
@@ -473,7 +461,7 @@ def generate_daily_analysis():
     
     if stocks_df.empty:
         message = "❌ Error: Could not load stock data for daily analysis."
-        send_telegram_message(message)
+        await send_telegram_message(message)
         return
     
     buy_recommendations = []
@@ -541,55 +529,33 @@ def generate_daily_analysis():
     }
     
     # Send to Telegram - both personal chat and group
-    send_telegram_message(message)
+    await send_telegram_message(message)
     
     return daily_analysis
 
-def schedule_jobs():
-    """Schedule all jobs"""
-    # Schedule market hours checks every X minutes
-    schedule.every(CHECK_INTERVAL_MINUTES).minutes.do(lambda: job_wrapper(run_analysis) if is_market_hours() else None)
-    
-    # Schedule daily analysis at market close
-    schedule.every().day.at(MARKET_CLOSE_TIME).do(lambda: job_wrapper(generate_daily_analysis))
-    
-    # Run jobs continuously
-    while True:
-        schedule.run_pending()
-        time.sleep(60)  # Check every minute
-
-def job_wrapper(job_func):
+async def job_wrapper(job_func):
     """Wrapper for scheduled jobs to handle exceptions"""
     try:
-        return job_func()
+        return await job_func()
     except Exception as e:
         print(f"Error in scheduled job {job_func.__name__}: {e}")
         error_message = f"❌ Error in {job_func.__name__}: {e}"
-        send_telegram_message(error_message)
+        await send_telegram_message(error_message)
 
-# Flask routes
-@app.route('/')
-def index():
-    """Main page that displays recommendations"""
-    return render_template('index.html')
+async def run_scheduled_job():
+    """Run scheduled jobs"""
+    # Check if it's market hours
+    if is_market_hours():
+        await job_wrapper(run_analysis)
+    
+    # Check if it's market close time
+    now = datetime.datetime.now(IST_TIMEZONE)
+    current_time = now.strftime("%H:%M")
+    if current_time == MARKET_CLOSE_TIME:
+        await job_wrapper(generate_daily_analysis)
 
-@app.route('/api/recommendations')
-def api_recommendations():
-    """API endpoint to get current recommendations"""
-    return jsonify({
-        'last_update': last_update_time,
-        'recommendations': current_recommendations
-    })
-
-@app.route('/api/daily')
-def api_daily():
-    """API endpoint to get daily analysis"""
-    return jsonify(daily_analysis)
-
-def run_flask():
-    """Run Flask app in a separate thread"""
-    app.run(host='0.0.0.0', port=int(os.environ.get('PORT', 8080)))
-def handle_command_start(update: Update, context: CallbackContext):
+# Command handlers for v20+
+async def handle_command_start(update: Update, context: ContextTypes.DEFAULT_TYPE):
     response = (
         "*Welcome to Nifty 50 Stock Analyzer Bot!*\n\n"
         "Available commands:\n"
@@ -598,9 +564,9 @@ def handle_command_start(update: Update, context: CallbackContext):
         "/daily - Get daily analysis\n"
         "/analyze <symbol> - Analyze a specific stock"
     )
-    update.message.reply_markdown(response)
+    await update.message.reply_markdown(response)
 
-def handle_command_status(update: Update, context: CallbackContext):
+async def handle_command_status(update: Update, context: ContextTypes.DEFAULT_TYPE):
     status = (
         "*Bot Status*\n\n"
         f"Current time: {datetime.datetime.now(IST_TIMEZONE).strftime('%Y-%m-%d %H:%M:%S')} IST\n"
@@ -610,18 +576,18 @@ def handle_command_status(update: Update, context: CallbackContext):
         f"Number of stocks being monitored: {len(load_stock_data()) if not load_stock_data().empty else 0}\n"
         f"Check interval: Every {CHECK_INTERVAL_MINUTES} minutes during market hours"
     )
-    update.message.reply_markdown(status)
+    await update.message.reply_markdown(status)
 
-def handle_command_recommendations(update: Update, context: CallbackContext):
+async def handle_command_recommendations(update: Update, context: ContextTypes.DEFAULT_TYPE):
     if not current_recommendations:
-        update.message.reply_markdown("No recommendations available yet. Please wait for the next analysis run.")
+        await update.message.reply_markdown("No recommendations available yet. Please wait for the next analysis run.")
         return
         
     # Get BUY and SELL recommendations only
     buy_sell_recs = [r for r in current_recommendations if r.get('recommendations', {}).get('OVERALL') in ['BUY', 'SELL']]
     
     if not buy_sell_recs:
-        update.message.reply_markdown("No BUY or SELL recommendations in the latest analysis.")
+        await update.message.reply_markdown("No BUY or SELL recommendations in the latest analysis.")
         return
         
     response = f"*Latest Recommendations ({last_update_time})*\n\n"
@@ -632,11 +598,11 @@ def handle_command_recommendations(update: Update, context: CallbackContext):
         response += f"Target: ₹{rec['target_price']}\n"
         response += f"Stop Loss: ₹{rec['stop_loss']}\n\n"
         
-    update.message.reply_markdown(response)
+    await update.message.reply_markdown(response)
 
-def handle_command_daily(update: Update, context: CallbackContext):
+async def handle_command_daily(update: Update, context: ContextTypes.DEFAULT_TYPE):
     if not daily_analysis:
-        update.message.reply_markdown("No daily analysis available yet. It will be generated after market hours.")
+        await update.message.reply_markdown("No daily analysis available yet. It will be generated after market hours.")
         return
         
     # Format daily analysis message
@@ -652,227 +618,343 @@ def handle_command_daily(update: Update, context: CallbackContext):
     
     message += f"\n*HOLD Recommendations: {daily_analysis['hold']} stocks*"
     
-    update.message.reply_markdown(message)
+    await update.message.reply_markdown(message)
 
-def handle_command_analyze(update: Update, context: CallbackContext):
+async def handle_command_analyze(update: Update, context: ContextTypes.DEFAULT_TYPE):
     if not context.args or len(context.args) < 1:
-        update.message.reply_text("Please provide a symbol to analyze. Example: /analyze RELIANCE")
+        await update.message.reply_text("Please provide a symbol to analyze. Example: /analyze RELIANCE")
         return
         
     # Extract the symbol from the command
-    symbol = context.args[0].upper().strip()
+    symbol = context.args[0].upper()
     
-    # Check if symbol exists in our data
+    # Check if symbol exists in our dataset
     stocks_df = load_stock_data()
-    if stocks_df.empty or symbol not in stocks_df['symbol'].values:
-        update.message.reply_markdown(f"Symbol {symbol} not found in the database.")
+    if not any(stocks_df['symbol'] == symbol):
+        await update.message.reply_text(f"Symbol {symbol} not found in Nifty 50 stocks list.")
         return
+        
+    # Send a message that analysis is in progress
+    await update.message.reply_text(f"Analyzing {symbol}. Please wait...")
     
-    update.message.reply_markdown(f"Analyzing {symbol}... Please wait.")
+    # Fetch and analyze the stock
+    stock_data = fetch_latest_data(symbol)
     
+    if stock_data.empty:
+        await update.message.reply_text(f"Error fetching data for {symbol}.")
+        return
+
+    # Calculate indicators and get recommendations    
+    stock_data = calculate_indicators(stock_data)
+    recommendations = get_recommendations_with_targets(stock_data, symbol)
+    
+    # Format and send the analysis
+    message = format_recommendations_message(recommendations)
+    await update.message.reply_markdown(message)
+    
+    # Create and send chart
     try:
-        # Fetch data for the symbol
-        stock_data = fetch_latest_data(symbol)
-        
-        if stock_data.empty:
-            update.message.reply_markdown(f"Could not fetch data for {symbol}.")
-            return
-            
-        # Calculate indicators and recommendations
-        stock_data = calculate_indicators(stock_data)
-        recommendations = get_recommendations_with_targets(stock_data, symbol)
-        
-        # Format and send recommendation message
-        message = format_recommendations_message(recommendations)
-        update.message.reply_markdown(message)
-        
-        # Create and send chart
         fig = create_technical_chart(stock_data, symbol)
         if fig:
             chart_path = f"static/{symbol}_chart.png"
             pio.write_image(fig, chart_path)
             
+            # Send the chart as photo
             with open(chart_path, 'rb') as photo:
-                update.message.reply_photo(photo, caption=f"Technical chart for {symbol}")
-                
+                await update.message.reply_photo(photo=photo, caption=f"Technical chart for {symbol}")
     except Exception as e:
-        error_message = f"Error analyzing {symbol}: {e}"
-        print(error_message)
-        update.message.reply_markdown(f"❌ {error_message}")
+        await update.message.reply_text(f"Error generating chart: {e}")
 
-def handle_unknown(update: Update, context: CallbackContext):
-    response = (
-        "I don't understand that command. Available commands:\n"
-        "/start - Show help message\n"
-        "/status - Check bot status\n"
-        "/recommendations - Get current recommendations\n"
-        "/daily - Get daily analysis\n"
-        "/analyze <symbol> - Analyze a specific stock"
+async def handle_unknown_command(update: Update, context: ContextTypes.DEFAULT_TYPE):
+    await update.message.reply_text(
+        "Sorry, I didn't understand that command. Use /help to see available commands."
     )
-    update.message.reply_text(response)
 
-def create_directories():
-    """Create necessary directories if they don't exist"""
+async def handle_help_command(update: Update, context: ContextTypes.DEFAULT_TYPE):
+    help_text = (
+        "*Nifty 50 Stock Analyzer Bot Help*\n\n"
+        "This bot analyzes Nifty 50 stocks using technical indicators and provides trading recommendations.\n\n"
+        "*Available Commands:*\n"
+        "/start - Start interacting with the bot\n"
+        "/status - Check bot status and market hours\n"
+        "/recommendations - Get latest stock recommendations\n"
+        "/daily - Get daily market analysis\n"
+        "/analyze <symbol> - Analyze a specific stock (e.g., /analyze RELIANCE)\n"
+        "/help - Show this help message\n\n"
+        "The bot runs analysis every {CHECK_INTERVAL_MINUTES} minutes during market hours and sends notifications for BUY/SELL recommendations."
+    )
+    await update.message.reply_markdown(help_text)
+
+async def handle_text_message(update: Update, context: ContextTypes.DEFAULT_TYPE):
+    """Handle regular text messages - interpret as symbols to analyze"""
+    text = update.message.text.strip().upper()
+    
+    # Check if it looks like a stock symbol (no spaces, alphanumeric)
+    if ' ' not in text and text.isalnum():
+        # Treat as a command to analyze the stock
+        context.args = [text]
+        await handle_command_analyze(update, context)
+    else:
+        await update.message.reply_text(
+            "Please use specific commands or enter a valid stock symbol. Use /help for more information."
+        )
+
+# Flask routes
+@app.route('/')
+def home():
+    """Home page with dashboard"""
+    return render_template('index.html', 
+                          market_status=is_market_hours(),
+                          last_update=last_update_time)
+
+@app.route('/api/recommendations')
+def api_recommendations():
+    """API endpoint to get current recommendations"""
+    return jsonify(current_recommendations)
+
+@app.route('/api/daily')
+def api_daily():
+    """API endpoint to get daily analysis"""
+    return jsonify(daily_analysis)
+
+@app.route('/api/analyze/<symbol>')
+def api_analyze(symbol):
+    """API endpoint to analyze a specific stock"""
+    symbol = symbol.upper()
+    
+    # Check if symbol exists
+    stocks_df = load_stock_data()
+    if not any(stocks_df['symbol'] == symbol):
+        return jsonify({"error": f"Symbol {symbol} not found in Nifty 50 stocks list."})
+    
+    # Fetch and analyze the stock
+    stock_data = fetch_latest_data(symbol)
+    
+    if stock_data.empty:
+        return jsonify({"error": f"Error fetching data for {symbol}."})
+    
+    # Calculate indicators and get recommendations
+    stock_data = calculate_indicators(stock_data)
+    recommendations = get_recommendations_with_targets(stock_data, symbol)
+    
+    return jsonify(recommendations)
+
+def run_scheduler():
+    """Run the scheduler in a separate thread"""
+    async def scheduler_job():
+        while True:
+            # Run the job
+            await run_scheduled_job()
+            # Sleep for the interval
+            await asyncio.sleep(CHECK_INTERVAL_MINUTES * 60)
+
+    # Create and run the event loop
+    loop = asyncio.new_event_loop()
+    asyncio.set_event_loop(loop)
+    loop.run_until_complete(scheduler_job())
+
+def ensure_directories():
+    """Ensure all required directories exist"""
     os.makedirs('static', exist_ok=True)
     os.makedirs(TEMPLATES_DIR, exist_ok=True)
+
+async def main():
+    """Main function to start the bot and web server"""
+    # Ensure directories exist
+    ensure_directories()
     
-    # Create basic index.html template if it doesn't exist
-    index_path = os.path.join(TEMPLATES_DIR, 'index.html')
-    if not os.path.exists(index_path):
-        with open(index_path, 'w') as f:
-            f.write("""<!DOCTYPE html>
+    # Create sample CSV file with Nifty 50 stocks if not exists
+    if not os.path.exists(CSV_FILE_PATH):
+        # Sample list of some Nifty 50 stocks
+        sample_stocks = pd.DataFrame({
+            'symbol': ['RELIANCE', 'TCS', 'HDFCBANK', 'INFY', 'ICICIBANK',
+                      'HDFC', 'KOTAKBANK', 'ITC', 'LT', 'SBIN',
+                      'AXISBANK', 'HINDUNILVR', 'BHARTIARTL', 'BAJFINANCE', 'ASIANPAINT'],
+            'name': ['Reliance Industries', 'Tata Consultancy Services', 'HDFC Bank', 'Infosys', 'ICICI Bank',
+                    'Housing Development Finance Corporation', 'Kotak Mahindra Bank', 'ITC', 'Larsen & Toubro', 'State Bank of India',
+                    'Axis Bank', 'Hindustan Unilever', 'Bharti Airtel', 'Bajaj Finance', 'Asian Paints']
+        })
+        sample_stocks.to_csv(CSV_FILE_PATH, index=False)
+    
+    # Create HTML template
+    if not os.path.exists(f"{TEMPLATES_DIR}/index.html"):
+        with open(f"{TEMPLATES_DIR}/index.html", "w") as f:
+            f.write("""
+<!DOCTYPE html>
 <html>
 <head>
     <title>Nifty 50 Stock Analyzer</title>
     <meta charset="UTF-8">
     <meta name="viewport" content="width=device-width, initial-scale=1.0">
+    <link href="https://cdn.jsdelivr.net/npm/bootstrap@5.3.0-alpha1/dist/css/bootstrap.min.css" rel="stylesheet">
     <style>
-        body {
-            font-family: Arial, sans-serif;
-            margin: 0;
-            padding: 20px;
-            background-color: #f5f5f5;
-        }
-        .container {
-            max-width: 1200px;
-            margin: 0 auto;
-            background-color: white;
-            padding: 20px;
-            border-radius: 5px;
-            box-shadow: 0 2px 5px rgba(0,0,0,0.1);
-        }
-        h1, h2 {
-            color: #333;
-        }
-        .recommendation {
-            margin-bottom: 15px;
-            padding: 15px;
-            border-radius: 5px;
-            background-color: #f9f9f9;
-        }
-        .buy {
-            border-left: 5px solid green;
-        }
-        .sell {
-            border-left: 5px solid red;
-        }
-        .hold {
-            border-left: 5px solid orange;
-        }
-        .last-update {
-            font-style: italic;
-            color: #777;
-            margin-bottom: 20px;
-        }
-        .tabs {
-            margin-bottom: 20px;
-        }
-        .tab {
-            display: inline-block;
-            padding: 10px 20px;
-            cursor: pointer;
-            background-color: #eee;
-            border-radius: 5px 5px 0 0;
-        }
-        .tab.active {
-            background-color: #007bff;
-            color: white;
-        }
-        .tab-content {
-            display: none;
-        }
-        .tab-content.active {
-            display: block;
-        }
+        body { padding-top: 20px; }
+        .recommendation-card { margin-bottom: 20px; }
+        .buy { border-left: 5px solid green; }
+        .sell { border-left: 5px solid red; }
+        .hold { border-left: 5px solid gray; }
     </style>
 </head>
 <body>
     <div class="container">
-        <h1>Nifty 50 Stock Analyzer</h1>
+        <h1 class="text-center mb-4">Nifty 50 Stock Analyzer</h1>
         
-        <div class="tabs">
-            <div class="tab active" data-tab="recommendations">Recommendations</div>
-            <div class="tab" data-tab="daily">Daily Analysis</div>
-        </div>
-        
-        <div id="recommendations-tab" class="tab-content active">
-            <div class="last-update">Last update: <span id="last-update">Loading...</span></div>
+        <div class="row">
+            <div class="col-md-6">
+                <div class="card mb-4">
+                    <div class="card-header">
+                        <h5>Market Status</h5>
+                    </div>
+                    <div class="card-body">
+                        <p><strong>Market is:</strong> <span id="market-status" class="badge bg-success">Loading...</span></p>
+                        <p><strong>Last Update:</strong> <span id="last-update">Loading...</span></p>
+                    </div>
+                </div>
+            </div>
             
-            <h2>Current Recommendations</h2>
-            <div id="recommendations-container">
-                <p>Loading recommendations...</p>
+            <div class="col-md-6">
+                <div class="card mb-4">
+                    <div class="card-header">
+                        <h5>Stock Analysis</h5>
+                    </div>
+                    <div class="card-body">
+                        <div class="input-group mb-3">
+                            <input type="text" id="symbol-input" class="form-control" placeholder="Enter stock symbol (e.g., RELIANCE)">
+                            <button class="btn btn-primary" type="button" id="analyze-btn">Analyze</button>
+                        </div>
+                    </div>
+                </div>
             </div>
         </div>
         
-        <div id="daily-tab" class="tab-content">
-            <h2>Daily Market Analysis</h2>
-            <div id="daily-container">
-                <p>Loading daily analysis...</p>
+        <ul class="nav nav-tabs mb-4" id="myTab" role="tablist">
+            <li class="nav-item" role="presentation">
+                <button class="nav-link active" id="recommendations-tab" data-bs-toggle="tab" data-bs-target="#recommendations" type="button" role="tab">Recommendations</button>
+            </li>
+            <li class="nav-item" role="presentation">
+                <button class="nav-link" id="daily-tab" data-bs-toggle="tab" data-bs-target="#daily" type="button" role="tab">Daily Analysis</button>
+            </li>
+            <li class="nav-item" role="presentation">
+                <button class="nav-link" id="analysis-tab" data-bs-toggle="tab" data-bs-target="#analysis" type="button" role="tab">Stock Analysis</button>
+            </li>
+        </ul>
+        
+        <div class="tab-content" id="myTabContent">
+            <div class="tab-pane fade show active" id="recommendations" role="tabpanel">
+                <h3>Latest Recommendations</h3>
+                <div id="recommendations-container" class="row">
+                    <p>Loading recommendations...</p>
+                </div>
+            </div>
+            
+            <div class="tab-pane fade" id="daily" role="tabpanel">
+                <h3>Daily Analysis</h3>
+                <div id="daily-container">
+                    <p>Loading daily analysis...</p>
+                </div>
+            </div>
+            
+            <div class="tab-pane fade" id="analysis" role="tabpanel">
+                <h3>Stock Analysis</h3>
+                <div id="analysis-container">
+                    <p>Select a stock to analyze using the input field above.</p>
+                </div>
             </div>
         </div>
     </div>
     
+    <script src="https://cdn.jsdelivr.net/npm/bootstrap@5.3.0-alpha1/dist/js/bootstrap.bundle.min.js"></script>
     <script>
-        // Tab functionality
-        document.querySelectorAll('.tab').forEach(tab => {
-            tab.addEventListener('click', () => {
-                // Remove active class from all tabs and content
-                document.querySelectorAll('.tab').forEach(t => t.classList.remove('active'));
-                document.querySelectorAll('.tab-content').forEach(c => c.classList.remove('active'));
-                
-                // Add active class to clicked tab
-                tab.classList.add('active');
-                
-                // Show corresponding content
-                const tabName = tab.getAttribute('data-tab');
-                document.getElementById(`${tabName}-tab`).classList.add('active');
+        // Update market status on page load
+        document.addEventListener('DOMContentLoaded', function() {
+            // Set market status
+            const marketStatus = {{ 'true' if market_status else 'false' }};
+            const statusEl = document.getElementById('market-status');
+            
+            if (marketStatus) {
+                statusEl.textContent = 'OPEN';
+                statusEl.className = 'badge bg-success';
+            } else {
+                statusEl.textContent = 'CLOSED';
+                statusEl.className = 'badge bg-danger';
+            }
+            
+            // Set last update time
+            const lastUpdate = "{{ last_update or 'Not available' }}";
+            document.getElementById('last-update').textContent = lastUpdate;
+            
+            // Load recommendations
+            fetchRecommendations();
+            
+            // Load daily analysis
+            fetchDailyAnalysis();
+            
+            // Add event listener for analyze button
+            document.getElementById('analyze-btn').addEventListener('click', function() {
+                const symbol = document.getElementById('symbol-input').value.trim().toUpperCase();
+                if (symbol) {
+                    analyzeStock(symbol);
+                } else {
+                    alert('Please enter a valid stock symbol.');
+                }
             });
         });
         
-        // Fetch recommendations
         function fetchRecommendations() {
             fetch('/api/recommendations')
                 .then(response => response.json())
                 .then(data => {
-                    // Update last update time
-                    document.getElementById('last-update').textContent = data.last_update || 'Not available';
-                    
-                    // Update recommendations
                     const container = document.getElementById('recommendations-container');
                     
-                    if (!data.recommendations || data.recommendations.length === 0) {
-                        container.innerHTML = '<p>No recommendations available.</p>';
+                    if (!data || data.length === 0) {
+                        container.innerHTML = '<p>No recommendations available yet.</p>';
                         return;
                     }
                     
-                    // Generate HTML for recommendations
-                    let html = '';
-                    data.recommendations.forEach(rec => {
-                        const overallRec = rec.recommendations?.OVERALL || 'UNKNOWN';
-                        html += `
-                            <div class="recommendation ${overallRec.toLowerCase()}">
-                                <h3>${rec.symbol} - ${overallRec}</h3>
-                                <p>Current Price: ₹${rec.price}</p>
-                                <p>Target Price: ₹${rec.target_price}</p>
-                                <p>Stop Loss: ₹${rec.stop_loss}</p>
-                                <h4>Technical Indicators:</h4>
-                                <ul>
-                        `;
+                    container.innerHTML = '';
+                    
+                    // Filter for BUY and SELL recommendations
+                    const filteredRecs = data.filter(rec => 
+                        rec.recommendations && rec.recommendations.OVERALL && 
+                        (rec.recommendations.OVERALL === 'BUY' || rec.recommendations.OVERALL === 'SELL')
+                    );
+                    
+                    if (filteredRecs.length === 0) {
+                        container.innerHTML = '<p>No BUY or SELL recommendations in the latest analysis.</p>';
+                        return;
+                    }
+                    
+                    filteredRecs.forEach(rec => {
+                        const card = document.createElement('div');
+                        card.className = `col-md-4`;
                         
-                        // Add each indicator
-                        for (const [indicator, signal] of Object.entries(rec.recommendations || {})) {
-                            if (indicator !== 'OVERALL') {
-                                html += `<li>${indicator}: ${signal}</li>`;
-                            }
+                        let recommendationClass = '';
+                        if (rec.recommendations.OVERALL === 'BUY') {
+                            recommendationClass = 'buy';
+                        } else if (rec.recommendations.OVERALL === 'SELL') {
+                            recommendationClass = 'sell';
+                        } else {
+                            recommendationClass = 'hold';
                         }
                         
-                        html += `
-                                </ul>
+                        card.innerHTML = `
+                            <div class="card recommendation-card ${recommendationClass}">
+                                <div class="card-header">
+                                    <h5>${rec.symbol}</h5>
+                                </div>
+                                <div class="card-body">
+                                    <h6 class="card-subtitle mb-2 text-muted">₹${rec.price}</h6>
+                                    <p class="card-text">
+                                        <strong>Recommendation:</strong> ${rec.recommendations.OVERALL}<br>
+                                        <strong>Target:</strong> ₹${rec.target_price}<br>
+                                        <strong>Stop Loss:</strong> ₹${rec.stop_loss}
+                                    </p>
+                                </div>
                             </div>
                         `;
+                        
+                        container.appendChild(card);
                     });
-                    
-                    container.innerHTML = html;
                 })
                 .catch(error => {
                     console.error('Error fetching recommendations:', error);
@@ -881,70 +963,55 @@ def create_directories():
                 });
         }
         
-        // Fetch daily analysis
         function fetchDailyAnalysis() {
             fetch('/api/daily')
                 .then(response => response.json())
                 .then(data => {
                     const container = document.getElementById('daily-container');
                     
-                    if (!data || !data.date) {
+                    if (!data || Object.keys(data).length === 0) {
                         container.innerHTML = '<p>No daily analysis available yet.</p>';
                         return;
                     }
                     
-                    // Generate HTML for daily analysis
-                    let html = `<h3>Analysis for ${data.date}</h3>`;
+                    let html = `<h4>Daily Analysis for ${data.date}</h4>`;
                     
-                    // BUY recommendations
-                    html += `<h4>BUY Recommendations (${data.buy.length})</h4>`;
-                    if (data.buy.length > 0) {
-                        html += '<table border="1" cellpadding="5" style="border-collapse: collapse; width: 100%;">';
-                        html += '<tr><th>Symbol</th><th>Price</th><th>Target</th><th>Stop Loss</th><th>Strength</th></tr>';
-                        
-                        data.buy.slice(0, 10).forEach(rec => {
-                            html += `
-                                <tr>
-                                    <td>${rec.symbol}</td>
-                                    <td>₹${rec.price}</td>
-                                    <td>₹${rec.target_price}</td>
-                                    <td>₹${rec.stop_loss}</td>
-                                    <td>${rec.strength}</td>
-                                </tr>
-                            `;
-                        });
-                        
-                        html += '</table>';
-                    } else {
-                        html += '<p>No BUY recommendations today.</p>';
-                    }
+                    html += '<div class="row mt-4"><div class="col-md-6">';
+                    html += `<h5>BUY Recommendations (${data.buy.length})</h5>`;
+                    html += '<table class="table table-striped table-sm">';
+                    html += '<thead><tr><th>Symbol</th><th>Price</th><th>Target</th><th>Stop Loss</th></tr></thead>';
+                    html += '<tbody>';
                     
-                    // SELL recommendations
-                    html += `<h4>SELL Recommendations (${data.sell.length})</h4>`;
-                    if (data.sell.length > 0) {
-                        html += '<table border="1" cellpadding="5" style="border-collapse: collapse; width: 100%;">';
-                        html += '<tr><th>Symbol</th><th>Price</th><th>Target</th><th>Stop Loss</th><th>Strength</th></tr>';
-                        
-                        data.sell.slice(0, 10).forEach(rec => {
-                            html += `
-                                <tr>
-                                    <td>${rec.symbol}</td>
-                                    <td>₹${rec.price}</td>
-                                    <td>₹${rec.target_price}</td>
-                                    <td>₹${rec.stop_loss}</td>
-                                    <td>${rec.strength}</td>
-                                </tr>
-                            `;
-                        });
-                        
-                        html += '</table>';
-                    } else {
-                        html += '<p>No SELL recommendations today.</p>';
-                    }
+                    data.buy.slice(0, 10).forEach(rec => {
+                        html += `<tr>
+                            <td>${rec.symbol}</td>
+                            <td>₹${rec.price}</td>
+                            <td>₹${rec.target_price}</td>
+                            <td>₹${rec.stop_loss}</td>
+                        </tr>`;
+                    });
                     
-                    // HOLD recommendations
-                    html += `<h4>HOLD Recommendations</h4>`;
-                    html += `<p>${data.hold} stocks are recommended to HOLD.</p>`;
+                    html += '</tbody></table>';
+                    html += '</div><div class="col-md-6">';
+                    
+                    html += `<h5>SELL Recommendations (${data.sell.length})</h5>`;
+                    html += '<table class="table table-striped table-sm">';
+                    html += '<thead><tr><th>Symbol</th><th>Price</th><th>Target</th><th>Stop Loss</th></tr></thead>';
+                    html += '<tbody>';
+                    
+                    data.sell.slice(0, 10).forEach(rec => {
+                        html += `<tr>
+                            <td>${rec.symbol}</td>
+                            <td>₹${rec.price}</td>
+                            <td>₹${rec.target_price}</td>
+                            <td>₹${rec.stop_loss}</td>
+                        </tr>`;
+                    });
+                    
+                    html += '</tbody></table>';
+                    html += '</div></div>';
+                    
+                    html += `<p class="mt-3"><strong>HOLD Recommendations:</strong> ${data.hold} stocks</p>`;
                     
                     container.innerHTML = html;
                 })
@@ -955,94 +1022,118 @@ def create_directories():
                 });
         }
         
-        // Initial fetch
-        fetchRecommendations();
-        fetchDailyAnalysis();
-        
-        // Refresh data every 5 minutes
-        setInterval(() => {
-            fetchRecommendations();
-            fetchDailyAnalysis();
-        }, 5 * 60 * 1000);
+        function analyzeStock(symbol) {
+            const container = document.getElementById('analysis-container');
+            container.innerHTML = '<p>Analyzing ' + symbol + '... Please wait.</p>';
+            
+            // Switch to the analysis tab
+            document.getElementById('analysis-tab').click();
+            
+            fetch('/api/analyze/' + symbol)
+                .then(response => response.json())
+                .then(data => {
+                    if (data.error) {
+                        container.innerHTML = '<p class="text-danger">' + data.error + '</p>';
+                        return;
+                    }
+                    
+                    let html = `<h4>Analysis for ${data.symbol}</h4>`;
+                    html += `<p><strong>Price:</strong> ₹${data.price} | <strong>Last Updated:</strong> ${data.timestamp}</p>`;
+                    
+                    html += '<div class="row mt-4">';
+                    html += '<div class="col-md-6">';
+                    html += '<div class="card">';
+                    html += '<div class="card-header"><h5>Technical Indicators</h5></div>';
+                    html += '<div class="card-body">';
+                    html += '<table class="table table-striped">';
+                    html += '<thead><tr><th>Indicator</th><th>Signal</th></tr></thead>';
+                    html += '<tbody>';
+                    
+                    Object.entries(data.recommendations).forEach(([indicator, signal]) => {
+                        if (indicator !== 'OVERALL') {
+                            let signalClass = '';
+                            if (signal === 'BUY') signalClass = 'text-success';
+                            else if (signal === 'SELL') signalClass = 'text-danger';
+                            
+                            html += `<tr>
+                                <td>${indicator}</td>
+                                <td class="${signalClass}">${signal}</td>
+                            </tr>`;
+                        }
+                    });
+                    
+                    html += '</tbody></table>';
+                    html += '</div></div></div>';
+                    
+                    html += '<div class="col-md-6">';
+                    html += '<div class="card">';
+                    html += '<div class="card-header"><h5>Recommendation</h5></div>';
+                    html += '<div class="card-body">';
+                    
+                    let overallClass = '';
+                    if (data.recommendations.OVERALL === 'BUY') overallClass = 'text-success';
+                    else if (data.recommendations.OVERALL === 'SELL') overallClass = 'text-danger';
+                    
+                    html += `<h3 class="${overallClass}">${data.recommendations.OVERALL}</h3>`;
+                    html += `<p><strong>Target Price:</strong> ₹${data.target_price}</p>`;
+                    html += `<p><strong>Stop Loss:</strong> ₹${data.stop_loss}</p>`;
+                    
+                    html += '</div></div></div>';
+                    html += '</div>';
+                    
+                    html += '<div class="mt-4">';
+                    html += `<p>Note: For a detailed technical chart, use the "/analyze ${data.symbol}" command in the Telegram bot.</p>`;
+                    html += '</div>';
+                    
+                    container.innerHTML = html;
+                })
+                .catch(error => {
+                    console.error('Error analyzing stock:', error);
+                    container.innerHTML = 
+                        '<p class="text-danger">Error analyzing stock. Please try again later.</p>';
+                });
+        }
     </script>
 </body>
-</html>""")
+</html>
+            """)
 
-def initialize_example_csv():
-    """Create example CSV file if it doesn't exist"""
-    if not os.path.exists(CSV_FILE_PATH):
-        print(f"Creating example CSV file at {CSV_FILE_PATH}")
-        
-        # Create sample data with top Nifty 50 stocks
-        example_stocks = [
-            {"symbol": "RELIANCE", "name": "Reliance Industries Ltd."},
-            {"symbol": "TCS", "name": "Tata Consultancy Services Ltd."},
-            {"symbol": "HDFC", "name": "HDFC Bank Ltd."},
-            {"symbol": "INFY", "name": "Infosys Ltd."},
-            {"symbol": "ICICIBANK", "name": "ICICI Bank Ltd."},
-            {"symbol": "HDFCBANK", "name": "HDFC Bank Ltd."},
-            {"symbol": "KOTAKBANK", "name": "Kotak Mahindra Bank Ltd."},
-            {"symbol": "LT", "name": "Larsen & Toubro Ltd."},
-            {"symbol": "SBIN", "name": "State Bank of India"},
-            {"symbol": "BAJFINANCE", "name": "Bajaj Finance Ltd."}
-        ]
-        
-        df = pd.DataFrame(example_stocks)
-        df.to_csv(CSV_FILE_PATH, index=False)
-
-def main():
-    """Main function to start all components"""
-    try:
-        # Create required directories and files
-        create_directories()
-        initialize_example_csv()
-        
-        # Start Telegram message handler
-        # Register command handlers
-        dispatcher.add_handler(CommandHandler("start", handle_command_start))
-        dispatcher.add_handler(CommandHandler("status", handle_command_status))
-        dispatcher.add_handler(CommandHandler("recommendations", handle_command_recommendations))
-        dispatcher.add_handler(CommandHandler("daily", handle_command_daily))
-        dispatcher.add_handler(CommandHandler("analyze", handle_command_analyze))
-        dispatcher.add_handler(MessageHandler(Filters.text & ~Filters.command, handle_unknown))
-
-        # Start the bot
-        updater.start_polling()
-        print(f"Telegram bot started and listening at {datetime.datetime.now(IST_TIMEZONE).strftime('%Y-%m-%d %H:%M:%S')}")
-        
-        # Welcome message on bot startup
-        startup_message = (
-            "*Nifty 50 Stock Analyzer Bot Started!*\n\n"
-            f"Started at: {datetime.datetime.now(IST_TIMEZONE).strftime('%Y-%m-%d %H:%M:%S')} IST\n"
-            f"Market hours: {MARKET_OPEN_TIME} - {MARKET_CLOSE_TIME} IST\n"
-            f"Check interval: Every {CHECK_INTERVAL_MINUTES} minutes during market hours\n\n"
-            "Bot will automatically analyze stocks and send recommendations during market hours."
-        )
-        
-        send_telegram_message(startup_message)
-        
-        # Start Flask server in a separate thread
-        flask_thread = threading.Thread(target=run_flask)
-        flask_thread.daemon = True
-        flask_thread.start()
-        print(f"Flask server started at http://0.0.0.0:{int(os.environ.get('PORT', 8080))}")
-        
-        # Run initial analysis if during market hours
-        if is_market_hours():
-            print("Running initial analysis...")
-            run_analysis()
-        
-        # Start the scheduler for recurring jobs
-        schedule_jobs()
-        
-    except Exception as e:
-        error_message = f"❌ Critical error in main: {e}"
-        print(error_message)
-        try:
-            send_telegram_message(error_message)
-        except:
-            pass
-        raise
+    # Initialize the Telegram application
+    application = Application.builder().token(TELEGRAM_BOT_TOKEN).build()
+    
+    # Add command handlers
+    application.add_handler(CommandHandler("start", handle_command_start))
+    application.add_handler(CommandHandler("help", handle_help_command))
+    application.add_handler(CommandHandler("status", handle_command_status))
+    application.add_handler(CommandHandler("recommendations", handle_command_recommendations))
+    application.add_handler(CommandHandler("daily", handle_command_daily))
+    application.add_handler(CommandHandler("analyze", handle_command_analyze))
+    
+    # Add message handler for text
+    application.add_handler(MessageHandler(filters.TEXT & ~filters.COMMAND, handle_text_message))
+    
+    # Start the scheduler in a separate thread
+    scheduler_thread = threading.Thread(target=run_scheduler, daemon=True)
+    scheduler_thread.start()
+    
+    # Start the Telegram bot
+    print("Starting Telegram bot...")
+    await application.initialize()
+    await application.start()
+    await application.updater.start_polling()
+    
+    # Start the Flask web server
+    print("Starting Flask web server...")
+    from waitress import serve
+    serve(app, host="0.0.0.0", port=5000)
+    
+    # Keep the main thread running
+    while True:
+        await asyncio.sleep(1)
 
 if __name__ == "__main__":
-    main()
+    try:
+        import asyncio
+        asyncio.run(main())
+    except KeyboardInterrupt:
+        print("Bot stopped!")
