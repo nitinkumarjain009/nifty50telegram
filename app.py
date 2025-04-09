@@ -1,11 +1,15 @@
-# app.py
+#app.py
 import logging
 import gc
 import time
+import os
 import pandas as pd
 import yfinance as yf
+import requests
 from datetime import datetime, timezone
 from flask import Flask, render_template
+from apscheduler.schedulers.background import BackgroundScheduler
+import pytz
 
 # Configure logging
 logging.basicConfig(level=logging.INFO, 
@@ -31,6 +35,17 @@ INITIAL_CASH = 100000
 BACKTEST_SYMBOL = "RELIANCE.NS"
 BACKTEST_PERIOD = "1y"
 
+# Telegram configuration
+TELEGRAM_BOT_TOKEN = "8017759392:AAEwM-W-y83lLXTjlPl8sC_aBmizuIrFXnU"
+TELEGRAM_CHAT_ID = "711856868"
+TELEGRAM_GROUP_CHANNEL = "@Stockniftybot"
+
+# Market timing configuration
+MARKET_OPEN_HOUR = 9  # 9 AM
+MARKET_CLOSE_HOUR = 15  # 3 PM
+SCAN_INTERVAL_MINUTES = 10
+INDIA_TIMEZONE = pytz.timezone('Asia/Kolkata')
+
 # Flask app initialization
 app = Flask(__name__)
 
@@ -41,6 +56,7 @@ app_cache = {
     'dataframe_summary': None,
     'backtest_results': None,
     'trades_executed': [],
+    'sent_buy_signals': set(),  # Track which buy signals have been sent
     'last_update_time': None,
     'processing_error': None
 }
@@ -57,12 +73,6 @@ def fetch_stock_data(symbol, period="6mo"):
         data = yf.download(symbol, period=period, auto_adjust=True, progress=False)
         end_time = time.time()
         logging.debug(f"Data fetch for {symbol} completed in {end_time - start_time:.2f} seconds.")
-        
-        # Additional debug logging to understand structure
-        if not data.empty:
-            logging.debug(f"Downloaded data for {symbol} - Column structure: {type(data.columns)}")
-            if isinstance(data.columns, pd.MultiIndex):
-                logging.debug(f"MultiIndex levels: {data.columns.levels}")
         
         if data.empty:
             logging.warning(f"No data returned by yfinance for symbol: {symbol}")
@@ -102,6 +112,44 @@ def calculate_all_indicators(df):
     result['RSI'] = 100 - (100 / (1 + rs))
     
     return result
+
+def extract_close_data(symbol_data, symbol):
+    """Extract close price data from potentially complex DataFrame structures."""
+    try:
+        # Check if we have MultiIndex columns (which happens even with single symbols sometimes)
+        if isinstance(symbol_data.columns, pd.MultiIndex):
+            logging.debug(f"MultiIndex detected for {symbol}. Levels: {symbol_data.columns}")
+            
+            # MultiIndex format: first level is usually the data type (Open, High, Low, Close, etc.)
+            if 'Close' in symbol_data.columns.get_level_values(0):
+                # Handle both cases - when it's a Series or DataFrame
+                close_data = symbol_data['Close']
+                
+                # Convert to DataFrame with 'Close' column if it's a Series
+                if isinstance(close_data, pd.Series):
+                    df_symbol = close_data.to_frame(name='Close')
+                else:
+                    # It's already a DataFrame, ensure column is named 'Close'
+                    df_symbol = close_data.copy()
+                    df_symbol.columns = ['Close']
+                
+                logging.debug(f"Successfully extracted Close data for {symbol}, shape: {df_symbol.shape}")
+                return df_symbol
+            else:
+                logging.warning(f"'Close' not found in column levels for {symbol}.")
+                return pd.DataFrame()
+        
+        # Standard DataFrame with direct columns
+        elif 'Close' in symbol_data.columns:
+            df_symbol = symbol_data[['Close']].copy()
+            logging.debug(f"Direct Close column found for {symbol}")
+            return df_symbol
+        else:
+            logging.warning(f"No 'Close' column found for {symbol}. Available columns: {symbol_data.columns}")
+            return pd.DataFrame()
+    except Exception as e:
+        logging.error(f"Error extracting Close data for {symbol}: {e}", exc_info=True)
+        return pd.DataFrame()
 
 def generate_recommendations(symbol, df_with_indicators):
     """Generate trading recommendations based on indicators."""
@@ -161,7 +209,6 @@ def save_portfolio(portfolio_state):
     """Save the paper trading portfolio state."""
     try:
         # In a real app, this would save to a database or file
-        # For this example, we'll just log it
         logging.info(f"Portfolio saved: Cash={portfolio_state['cash']}, Holdings={portfolio_state['holdings']}")
         return True
     except Exception as e:
@@ -263,31 +310,14 @@ def get_portfolio_value(portfolio, current_prices):
     
     return total_value, portfolio['cash'], holdings_details
 
-# In the run_backtest function, replace the problematic code with this:
-
 def run_backtest(symbol, backtest_data, initial_capital=100000):
     """Run a simple backtest on historical data."""
     if backtest_data.empty:
         return {"error": "No backtest data available"}
     
-    # Ensure we have a dataframe with the right columns
-    if isinstance(backtest_data.columns, pd.MultiIndex):
-        if 'Close' in backtest_data.columns.get_level_values(0):
-            # Handle MultiIndex DataFrame properly
-            close_data = backtest_data['Close']
-            
-            # Check if it's a Series (single-level) or DataFrame (multi-level)
-            if isinstance(close_data, pd.Series):
-                df = close_data.to_frame(name='Close')
-            else:
-                # It's already a DataFrame, rename column
-                df = close_data.copy()
-                df.columns = ['Close']
-        else:
-            return {"error": "Required 'Close' column not found in backtest data"}
-    elif 'Close' in backtest_data.columns:
-        df = backtest_data[['Close']].copy()
-    else:
+    # Extract Close data
+    df = extract_close_data(backtest_data, symbol)
+    if df.empty:
         return {"error": "Required 'Close' column not found in backtest data"}
     
     # Calculate indicators
@@ -362,77 +392,6 @@ def run_backtest(symbol, backtest_data, initial_capital=100000):
         'trades': trades
     }
 
-# Now, let's update the app to scan every 10 minutes and send Telegram notifications
-
-# Add these imports at the top
-import requests
-from apscheduler.schedulers.background import BackgroundScheduler
-import threading
-import pytz
-
-# Add these constants
-TELEGRAM_BOT_TOKEN = "8017759392:AAEwM-W-y83lLXTjlPl8sC_aBmizuIrFXnU"
-TELEGRAM_CHAT_ID = "711856868"  # Replace with your channel or chat ID
-TELEGRAM_GROUP_CHANNEL = "@Stockniftybot"
-
-MARKET_OPEN_HOUR = 9  # 9 AM
-MARKET_CLOSE_HOUR = 15  # 3 PM
-SCAN_INTERVAL_MINUTES = 10
-INDIA_TIMEZONE = pytz.timezone('Asia/Kolkata')
-
-# Update the function to send Telegram notifications
-def send_telegram_message(message):
-    """Send a text message to Telegram."""
-    try:
-        url = f"https://api.telegram.org/bot{TELEGRAM_BOT_TOKEN}/sendMessage"
-        payload = {
-            "chat_id": TELEGRAM_CHAT_ID,
-            "text": message,
-            "parse_mode": "HTML"
-        }
-        response = requests.post(url, data=payload)
-        if response.status_code == 200:
-            logging.info(f"Telegram message sent successfully")
-            return True
-        else:
-            logging.error(f"Failed to send Telegram message: {response.text}")
-            return False
-    except Exception as e:
-        logging.error(f"Error sending Telegram message: {e}", exc_info=True)
-        return False
-
-def notify_recommendations_photo(df_summary):
-    """Send a Telegram notification with the recommendations."""
-    try:
-        # Filter only BUY signals
-        buy_signals = df_summary[df_summary['Signal'] == 'BUY']
-        
-        if buy_signals.empty:
-            logging.info("No BUY signals to send")
-            return True
-        
-        # Format message for Telegram
-        message = "<b>🔔 BUY SIGNALS 🔔</b>\n\n"
-        for _, row in buy_signals.iterrows():
-            message += f"<b>{row['Symbol']}</b>\n"
-            message += f"Current Price: ₹{row['CMP']}\n"
-            message += f"Target: ₹{row['Target']}\n"
-            message += f"Change: {row['% Change']}\n"
-            message += "---------------\n"
-        
-        # Add timestamp
-        now = datetime.now(INDIA_TIMEZONE)
-        message += f"\n<i>Generated at {now.strftime('%Y-%m-%d %H:%M:%S')}</i>"
-        
-        # Send message
-        send_telegram_message(message)
-        logging.info(f"Telegram notification sent with {len(buy_signals)} buy recommendations")
-        return True
-    except Exception as e:
-        logging.error(f"Error sending Telegram notification: {e}", exc_info=True)
-        return False
-
-# Function to check if market is open
 def is_market_open():
     """Check if the market is currently open."""
     now = datetime.now(INDIA_TIMEZONE)
@@ -447,54 +406,94 @@ def is_market_open():
     
     return market_start <= now <= market_end
 
-# This is the new scheduled task function
-def scheduled_data_update():
-    """Function to be called by the scheduler."""
+def send_telegram_message(message):
+    """Send a text message to Telegram."""
     try:
-        if is_market_open():
-            logging.info("Scheduled update: Market is open, processing data...")
-            process_all_data()
+        url = f"https://api.telegram.org/bot{TELEGRAM_BOT_TOKEN}/sendMessage"
+        payload = {
+            "chat_id": TELEGRAM_CHAT_ID,
+            "text": message,
+            "parse_mode": "HTML"
+        }
+        response = requests.post(url, data=payload, timeout=10)
+        if response.status_code == 200:
+            logging.info(f"Telegram message sent successfully")
+            return True
         else:
-            logging.info("Scheduled update: Market is closed, skipping data processing.")
+            logging.error(f"Failed to send Telegram message: {response.text}")
+            return False
     except Exception as e:
-        logging.error(f"Error in scheduled data update: {e}", exc_info=True)
+        logging.error(f"Error sending Telegram message: {e}", exc_info=True)
+        return False
 
-# Initialize the scheduler and background thread
-scheduler = BackgroundScheduler()
-scheduler.add_job(
-    scheduled_data_update, 
-    'interval', 
-    minutes=SCAN_INTERVAL_MINUTES,
-    id='market_data_update'
-)
-
-# Update the main execution part
-if __name__ == '__main__':
-    logging.info("Performing initial data load on startup...")
-    process_all_data()
+def send_buy_signal_notification(symbol, price, target, change_pct):
+    """Send an immediate notification for a new BUY signal."""
+    global app_cache
     
-    # Start the scheduler
-    scheduler.start()
-    logging.info(f"Scheduler started. Running every {SCAN_INTERVAL_MINUTES} minutes during market hours.")
+    # Generate a unique identifier for this buy signal
+    signal_id = f"{symbol}_{price:.2f}_{datetime.now(INDIA_TIMEZONE).strftime('%Y%m%d')}"
     
-    try:
-        # Run the Flask app
-        logging.info("Initial data load complete. Web server starting...")
-        app.run(host='0.0.0.0', port=int(os.environ.get('PORT', 8080)))
-    except (KeyboardInterrupt, SystemExit):
-        # Shut down the scheduler when exiting
-        scheduler.shutdown()
-        logging.info("Application shutting down...")
+    # Check if we've already sent this signal
+    if signal_id in app_cache['sent_buy_signals']:
+        logging.debug(f"Buy signal for {symbol} already sent today, skipping notification")
+        return False
+    
+    # Format the message
+    message = f"<b>🔔 NEW BUY SIGNAL 🔔</b>\n\n"
+    message += f"<b>{symbol}</b>\n"
+    message += f"Current Price: ₹{price:.2f}\n"
+    message += f"Target: ₹{target:.2f}\n"
+    message += f"Change: {change_pct:.2f}%\n"
+    message += f"Reason: MACD bullish crossover with RSI confirmation\n"
+    message += "\n<i>Trade with caution. This is an automated alert.</i>"
+    
+    # Send the message
+    success = send_telegram_message(message)
+    
+    if success:
+        # Mark this signal as sent
+        app_cache['sent_buy_signals'].add(signal_id)
+        logging.info(f"Sent immediate buy signal notification for {symbol}")
+        return True
+    
+    return False
 
-def notify_recommendations_photo(df_summary):
-    """Send a Telegram notification with the recommendations."""
+def notify_recommendations_summary(df_summary):
+    """Send a Telegram notification with all current buy recommendations."""
     try:
-        # In a real app, this would send to Telegram
-        # For this example, we'll just log it
-        logging.info(f"Telegram notification sent with {len(df_summary)} recommendations")
+        # Filter only BUY signals
+        buy_signals = df_summary[df_summary['Signal'] == 'BUY']
+        
+        if buy_signals.empty:
+            logging.info("No BUY signals to send in summary")
+            return True
+        
+        # Format message for Telegram
+        message = "<b>🔔 CURRENT BUY SIGNALS SUMMARY 🔔</b>\n\n"
+        for _, row in buy_signals.iterrows():
+            symbol = row['Symbol']
+            price = row['CMP'].replace(',', '')  # Remove formatting
+            try:
+                price = float(price)
+            except:
+                price = "N/A"
+            
+            message += f"<b>{symbol}</b>\n"
+            message += f"Current Price: {row['CMP']}\n"
+            message += f"Target: {row['Target']}\n"
+            message += f"Change: {row['% Change']}\n"
+            message += "---------------\n"
+        
+        # Add timestamp
+        now = datetime.now(INDIA_TIMEZONE)
+        message += f"\n<i>Generated at {now.strftime('%Y-%m-%d %H:%M:%S')}</i>"
+        
+        # Send message
+        send_telegram_message(message)
+        logging.info(f"Telegram summary notification sent with {len(buy_signals)} buy recommendations")
         return True
     except Exception as e:
-        logging.error(f"Error sending Telegram notification: {e}", exc_info=True)
+        logging.error(f"Error sending Telegram summary notification: {e}", exc_info=True)
         return False
 
 # --- Background Data Processing Function ---
@@ -512,101 +511,68 @@ def process_all_data():
     local_portfolio_state = None
     local_backtest_results = None
     local_error = None
-    dataframe_for_telegram = pd.DataFrame()
+    new_buy_signals = []
 
-    # --- Use Hardcoded Symbol List ---
+    # --- Process Symbols ---
     symbols = NIFTY_50_SYMBOLS
-    logging.info(f"Using hardcoded list of {len(symbols)} Nifty 50 symbols.")
+    logging.info(f"Processing {len(symbols)} Nifty 50 symbols.")
 
     if not symbols:
         local_error = "Symbol list is empty. Cannot process."
     else:
-        logging.info(f"Processing {len(symbols)} symbols sequentially...")
         # --- Symbol Loop ---
         for symbol in symbols:
-            symbol_data = pd.DataFrame()
-            df_with_indicators = pd.DataFrame()
-            logging.debug(f"--- Processing symbol: {repr(symbol)} ---")
             try:
+                # Fetch data
                 symbol_data = fetch_stock_data(symbol, period=DATA_FETCH_PERIOD)
-
-                # --- Data Validation Checks ---
                 if symbol_data.empty or len(symbol_data) < 2:
-                    # Log and skip if insufficient data
-                    if symbol_data.empty: 
-                        logging.warning(f"Skipping {repr(symbol)}: No data fetched.")
-                    else: 
-                        logging.warning(f"Skipping {repr(symbol)}: Insufficient data rows fetched ({len(symbol_data)}).")
+                    logging.warning(f"Skipping {symbol}: Insufficient data.")
                     continue
 
-                # *** IMPROVED 'Close' COLUMN HANDLING ***
-                logging.debug(f"Data for {symbol} - columns type: {type(symbol_data.columns)}")
-                logging.debug(f"Data for {symbol} - columns: {symbol_data.columns}")
-                
-                # Check if we have MultiIndex columns (which happens even with single symbols sometimes)
-                if isinstance(symbol_data.columns, pd.MultiIndex):
-                    logging.debug(f"MultiIndex detected for {symbol}. Levels: {symbol_data.columns}")
-                    
-                    # MultiIndex format: first level is usually the data type (Open, High, Low, Close, etc.)
-                    if 'Close' in symbol_data.columns.get_level_values(0):
-                        # Handle both cases - when it's a Series or DataFrame
-                        close_data = symbol_data['Close']
-                        
-                        # Convert to DataFrame with 'Close' column if it's a Series
-                        if isinstance(close_data, pd.Series):
-                            df_symbol = close_data.to_frame(name='Close')
-                        else:
-                            # It's already a DataFrame, ensure column is named 'Close'
-                            df_symbol = close_data.copy()
-                            df_symbol.columns = ['Close']
-                        
-                        logging.debug(f"Successfully extracted Close data for {symbol}, shape: {df_symbol.shape}")
-                    else:
-                        logging.warning(f"'Close' not found in column levels for {symbol}. Available levels: {symbol_data.columns.get_level_values(0).unique()}")
-                        continue
-                
-                # Standard DataFrame with direct columns
-                elif 'Close' in symbol_data.columns:
-                    df_symbol = symbol_data[['Close']].copy()
-                    logging.debug(f"Direct Close column found for {symbol}")
-                else:
-                    logging.warning(f"No 'Close' column found for {symbol}. Available columns: {symbol_data.columns}")
-                    continue
-                
-                # Drop NaNs from the prepared 'Close' column
-                df_symbol = df_symbol.dropna(subset=['Close'])
-                
-                # Check if we have enough data after cleanup
+                # Extract Close data
+                df_symbol = extract_close_data(symbol_data, symbol)
                 if df_symbol.empty or len(df_symbol) < 2:
-                    if df_symbol.empty: 
-                        logging.warning(f"Skipping {repr(symbol)}: DataFrame empty after dropna for 'Close'.")
-                    else: 
-                        logging.warning(f"Skipping {repr(symbol)}: Insufficient valid 'Close' data ({len(df_symbol)} rows) after dropna.")
+                    logging.warning(f"Skipping {symbol}: Failed to extract Close data.")
                     continue
-
-                # --- Indicator Calculation ---
-                df_with_indicators = calculate_all_indicators(df_symbol)
                 
-                if df_with_indicators.empty or 'Close' not in df_with_indicators.columns or len(df_with_indicators) < 2:
-                    logging.warning(f"Skipping {repr(symbol)}: Indicator calculation failed or insufficient data.")
+                # Drop NaNs
+                df_symbol = df_symbol.dropna(subset=['Close'])
+                if df_symbol.empty or len(df_symbol) < 2:
+                    logging.warning(f"Skipping {symbol}: No valid price data after dropna.")
                     continue
 
-                # --- Extract Prices & Calculate Change ---
+                # Calculate indicators
+                df_with_indicators = calculate_all_indicators(df_symbol)
+                if df_with_indicators.empty:
+                    logging.warning(f"Skipping {symbol}: Failed to calculate indicators.")
+                    continue
+
+                # Extract Prices & Calculate Change
                 current_close = df_with_indicators['Close'].iloc[-1]
                 prev_close = df_with_indicators['Close'].iloc[-2]
                 local_current_prices[symbol] = current_close
-
                 percent_change = ((current_close - prev_close) / prev_close) * 100 if prev_close else 0.0
 
-                # --- Generate Trading Signal ---
+                # Generate Trading Signal
                 recommendation_result = generate_recommendations(symbol, df_with_indicators)
                 signal = recommendation_result.get('signal', 'HOLD') if recommendation_result else "HOLD"
                 target = recommendation_result.get('target') if recommendation_result else None
                 
-                if recommendation_result and signal in ['BUY', 'SELL']:
+                # Track recommendations for trading and immediate notifications
+                if recommendation_result and signal == 'BUY':
                     local_recommendations_for_trade.append(recommendation_result)
-
-                # --- Store Combined Data ---
+                    
+                    # Check if this is a new buy signal to send immediate notification
+                    signal_id = f"{symbol}_{current_close:.2f}_{datetime.now(INDIA_TIMEZONE).strftime('%Y%m%d')}"
+                    if signal_id not in app_cache['sent_buy_signals']:
+                        new_buy_signals.append({
+                            'symbol': symbol,
+                            'price': current_close,
+                            'target': target,
+                            'change_pct': percent_change
+                        })
+                
+                # Store Combined Data
                 stock_info = {
                     'symbol': symbol, 
                     'cmp': current_close, 
@@ -616,28 +582,27 @@ def process_all_data():
                 }
                 local_all_stock_data.append(stock_info)
 
-            # --- Error Handling for the Symbol Loop ---
-            except KeyError as ke:
-                logging.error(f"KeyError processing {repr(symbol)}: {ke}", exc_info=True)
-                local_error = f"Data error for {symbol} (KeyError)."
-            except IndexError as idx_err:
-                logging.warning(f"IndexError processing {repr(symbol)} (likely price/indicator access): {idx_err}. Skipping symbol.")
             except Exception as e:
-                logging.error(f"Unhandled error processing symbol {repr(symbol)}: {e}", exc_info=True)
-                local_error = f"Unexpected error processing {symbol} (see logs)."
-
+                logging.error(f"Error processing {symbol}: {e}", exc_info=True)
+                continue
             finally:
-                # --- Cleanup ---
-                del symbol_data, df_with_indicators
+                # Cleanup
                 gc.collect()
-        # --- End Symbol Loop ---
-        logging.info(f"Finished processing symbols.")
+    
+    # --- Send Immediate Notifications for New Buy Signals ---
+    for signal in new_buy_signals:
+        send_buy_signal_notification(
+            signal['symbol'],
+            signal['price'],
+            signal['target'],
+            signal['change_pct']
+        )
 
-    # --- Step 3: Prepare Data for Telegram ---
+    # --- Prepare DataFrame Summary ---
     if local_all_stock_data:
         try:
-            dataframe_for_telegram = pd.DataFrame(local_all_stock_data)
-            df_display = dataframe_for_telegram[['symbol', 'cmp', 'percent_change', 'signal', 'target']].copy()
+            dataframe_for_display = pd.DataFrame(local_all_stock_data)
+            df_display = dataframe_for_display[['symbol', 'cmp', 'percent_change', 'signal', 'target']].copy()
             df_display.rename(columns={
                 'symbol': 'Symbol', 
                 'cmp': 'CMP', 
@@ -651,67 +616,30 @@ def process_all_data():
             df_display['Target'] = df_display['Target'].map(lambda x: '{:,.2f}'.format(x) if pd.notnull(x) else 'N/A')
             app_cache['dataframe_summary'] = df_display
         except Exception as df_err:
-            logging.error(f"Error creating/formatting DataFrame for Telegram: {df_err}", exc_info=True)
-            local_error = (local_error + " | Error preparing data for Telegram." if local_error else "Error preparing data for Telegram.")
+            logging.error(f"Error creating DataFrame summary: {df_err}", exc_info=True)
+            local_error = "Error preparing data summary."
             app_cache['dataframe_summary'] = None
 
-    # --- Step 4: Update Paper Trading Portfolio ---
-    if local_recommendations_for_trade:
-        valid_trade_recs = [rec for rec in local_recommendations_for_trade if rec['symbol'] in local_current_prices]
-        if valid_trade_recs:
-            try:
-                local_portfolio_state, local_trades_executed = update_paper_portfolio(valid_trade_recs, local_current_prices)
-            except Exception as trade_err:
-                logging.error(f"Error updating paper portfolio: {trade_err}", exc_info=True)
-                local_error = (local_error + " | Error during paper trading." if local_error else "Error during paper trading.")
-                try: 
-                    local_portfolio_state = load_portfolio()
-                except: 
-                    local_portfolio_state = {'cash': INITIAL_CASH, 'holdings': {}}
-        else:
-            try: 
-                local_portfolio_state = load_portfolio()
-            except: 
-                local_portfolio_state = {'cash': INITIAL_CASH, 'holdings': {}}
-    else:
-        try: 
-            local_portfolio_state = load_portfolio()
-        except Exception as load_err:
-            local_portfolio_state = {'cash': INITIAL_CASH, 'holdings': {}}
-            logging.error(f"Failed load portfolio: {load_err}")
-
-    # --- Step 5: Send Telegram Notification PHOTO ---
-    df_summary_to_send = app_cache.get('dataframe_summary')
-    if df_summary_to_send is not None and not df_summary_to_send.empty:
-        logging.info("Sending Telegram notification photo...")
-        notify_recommendations_photo(df_summary_to_send)
-    elif not local_all_stock_data: 
-        logging.warning("Skipping Telegram photo: No stock data processed.")
-    else: 
-        logging.warning("Skipping Telegram photo: Summary DataFrame could not be generated.")
-
-    # --- Step 6: Calculate Portfolio Display Value ---
+    # --- Update Paper Trading Portfolio ---
     try:
-        if local_portfolio_state is None:
-            try: 
-                local_portfolio_state = load_portfolio()
-            except: 
-                local_portfolio_state = {'cash': INITIAL_CASH, 'holdings': {}}
-        
-        if local_current_prices is None: 
-            local_current_prices = {}
+        if local_recommendations_for_trade:
+            local_portfolio_state, local_trades_executed = update_paper_portfolio(
+                local_recommendations_for_trade, local_current_prices
+            )
+        else:
+            local_portfolio_state = load_portfolio()
             
+        # Calculate portfolio display value
         total_value, cash, holdings_details = get_portfolio_value(local_portfolio_state, local_current_prices)
         local_portfolio_display = {'total_value': total_value, 'cash': cash, 'holdings': holdings_details}
+        
     except Exception as e:
-        logging.error(f"Error calculating portfolio display value: {e}", exc_info=True)
-        local_error = (local_error + " | Error calculating portfolio value." if local_error else "Error calculating portfolio value.")
-        local_portfolio_display = {'total_value': 'Error', 'cash': 'Error', 'holdings': []}
-        if local_portfolio_state: 
-            local_portfolio_display['cash'] = local_portfolio_state.get('cash', 'Error')
+        logging.error(f"Error updating portfolio: {e}", exc_info=True)
+        local_error = (local_error + " | Portfolio update error." if local_error else "Portfolio update error.")
+        local_portfolio_state = {'cash': INITIAL_CASH, 'holdings': {}}
+        local_portfolio_display = {'total_value': INITIAL_CASH, 'cash': INITIAL_CASH, 'holdings': []}
 
-    # --- Step 7: Run Backtesting Example ---
-    logging.info(f"Running backtest for {BACKTEST_SYMBOL}...")
+    # --- Run Backtest ---
     try:
         backtest_data = fetch_stock_data(BACKTEST_SYMBOL, period=BACKTEST_PERIOD)
         if not backtest_data.empty:
@@ -719,10 +647,10 @@ def process_all_data():
         else:
             local_backtest_results = {"error": f"Could not fetch data for {BACKTEST_SYMBOL}."}
     except Exception as e:
-        logging.error(f"Error running backtest for {BACKTEST_SYMBOL}: {e}", exc_info=True)
-        local_backtest_results = {"error": f"An error occurred during backtesting: {e}"}
+        logging.error(f"Error running backtest: {e}", exc_info=True)
+        local_backtest_results = {"error": f"Backtest error: {str(e)[:100]}"}
 
-    # --- Step 8: Update Cache with Results ---
+    # --- Update Cache ---
     app_cache['all_stock_data'] = local_all_stock_data
     app_cache['portfolio_display'] = local_portfolio_display
     app_cache['backtest_results'] = local_backtest_results
@@ -730,12 +658,23 @@ def process_all_data():
     app_cache['last_update_time'] = datetime.now(timezone.utc)
     app_cache['processing_error'] = local_error
 
+    # Send periodic summary if enough time has passed
+    notify_recommendations_summary(app_cache['dataframe_summary'])
+
     end_process_time = time.time()
-    logging.info(f"--- Background Data Processing Finished ({end_process_time - start_process_time:.2f} seconds) ---")
-    if local_error: 
-        logging.error(f"Processing finished with error(s): {local_error}")
-    else: 
-        logging.info("Processing finished successfully.")
+    logging.info(f"--- Data Processing Finished in {end_process_time - start_process_time:.2f} seconds ---")
+
+# --- Scheduled Task Function ---
+def scheduled_data_update():
+    """Function to be called by the scheduler."""
+    try:
+        if is_market_open():
+            logging.info("Scheduled update: Market is open, processing data...")
+            process_all_data()
+        else:
+            logging.info("Scheduled update: Market is closed, skipping processing.")
+    except Exception as e:
+        logging.error(f"Error in scheduled update: {e}", exc_info=True)
 
 # --- Flask Route ---
 @app.route('/')
@@ -745,12 +684,12 @@ def index():
     
     if app_cache['last_update_time'] is None: 
         cache_needs_update = True
-        logging.info("Cache empty, processing.")
+        logging.info("Cache empty, processing data.")
     else:
         time_since_update = now - app_cache['last_update_time']
         if time_since_update.total_seconds() > CACHE_DURATION_SECONDS: 
             cache_needs_update = True
-            logging.info("Cache expired, processing.")
+            logging.info("Cache expired, processing data.")
         else: 
             logging.info("Serving from cache.")
             
@@ -758,10 +697,10 @@ def index():
         try: 
             process_all_data()
         except Exception as e:
-            logging.error(f"Critical error calling process_all_data: {e}", exc_info=True)
-            app_cache['processing_error'] = f"Failed update: {e}"
+            logging.error(f"Critical error in data processing: {e}", exc_info=True)
+            app_cache['processing_error'] = f"Data processing error: {str(e)[:100]}"
             if app_cache['last_update_time'] is None: 
-                return render_template('index.html', error=f"Initial processing failed: {e}", last_updated="Never")
+                return render_template('index.html', error=f"Initial processing failed: {str(e)[:100]}", last_updated="Never")
                 
     last_updated_str = app_cache['last_update_time'].strftime('%Y-%m-%d %H:%M:%S UTC') if app_cache['last_update_time'] else "Processing..."
     display_error = app_cache.get('processing_error')
@@ -771,12 +710,375 @@ def index():
         paper_portfolio=app_cache.get('portfolio_display'),
         initial_capital=INITIAL_CASH, 
         trades_executed=app_cache.get('trades_executed', []),
-        backtest_results=app_cache.get('backtest_results'), 
-        last_updated=last_updated_str, 
-        error=display_error)
+        backtest_results=app_cache.get('backtest_results'),
+        dataframe_summary=app_cache.get('dataframe_summary'),
+        last_updated=last_updated_str,
+        error=display_error,
+        market_status="OPEN" if is_market_open() else "CLOSED"
+    )
 
-# --- Main Execution ---
+@app.route('/refresh')
+def refresh_data():
+    """Force a data refresh regardless of cache time."""
+    try:
+        process_all_data()
+        return {'status': 'success', 'timestamp': app_cache['last_update_time'].strftime('%Y-%m-%d %H:%M:%S UTC')}
+    except Exception as e:
+        logging.error(f"Error in manual refresh: {e}", exc_info=True)
+        return {'status': 'error', 'message': str(e)}
+
+@app.route('/status')
+def api_status():
+    """Return API status information."""
+    return {
+        'status': 'online',
+        'market_status': "OPEN" if is_market_open() else "CLOSED",
+        'last_update': app_cache['last_update_time'].strftime('%Y-%m-%d %H:%M:%S UTC') if app_cache['last_update_time'] else None,
+        'symbols_count': len(app_cache.get('all_stock_data', [])),
+        'cache_ttl': CACHE_DURATION_SECONDS,
+        'server_time': datetime.now(timezone.utc).strftime('%Y-%m-%d %H:%M:%S UTC')
+    }
+
+def create_scheduler():
+    """Initialize and start the background scheduler."""
+    try:
+        scheduler = BackgroundScheduler(timezone=INDIA_TIMEZONE)
+        
+        # Add job to run during market hours on weekdays
+        scheduler.add_job(
+            scheduled_data_update,
+            'cron',
+            day_of_week='mon-fri',
+            hour=f"{MARKET_OPEN_HOUR}-{MARKET_CLOSE_HOUR}",
+            minute=f"*/{SCAN_INTERVAL_MINUTES}",
+            misfire_grace_time=60
+        )
+        
+        # Add job to run at market open for initial data
+        scheduler.add_job(
+            scheduled_data_update,
+            'cron',
+            day_of_week='mon-fri',
+            hour=MARKET_OPEN_HOUR,
+            minute=15
+        )
+        
+        logging.info("Starting background scheduler...")
+        scheduler.start()
+        return scheduler
+    except Exception as e:
+        logging.error(f"Failed to create scheduler: {e}", exc_info=True)
+        return None
+
+# --- Create templates directory if it doesn't exist ---
+def ensure_template_directory():
+    template_dir = os.path.join(os.path.dirname(os.path.abspath(__file__)), 'templates')
+    if not os.path.exists(template_dir):
+        try:
+            os.makedirs(template_dir)
+            logging.info(f"Created template directory: {template_dir}")
+        except Exception as e:
+            logging.error(f"Failed to create template directory: {e}", exc_info=True)
+            return False
+    
+    # Create a basic index.html template if it doesn't exist
+    index_template_path = os.path.join(template_dir, 'index.html')
+    if not os.path.exists(index_template_path):
+        try:
+            with open(index_template_path, 'w') as f:
+                f.write("""<!DOCTYPE html>
+<html lang="en">
+<head>
+    <meta charset="UTF-8">
+    <meta name="viewport" content="width=device-width, initial-scale=1.0">
+    <title>Nifty 50 Stock Scanner</title>
+    <link href="https://cdn.jsdelivr.net/npm/bootstrap@5.3.0-alpha1/dist/css/bootstrap.min.css" rel="stylesheet">
+    <style>
+        .card { margin-bottom: 20px; }
+        .up { color: green; }
+        .down { color: red; }
+        .signal-BUY { background-color: #d4edda; }
+        .signal-SELL { background-color: #f8d7da; }
+        th { position: sticky; top: 0; background-color: #fff; }
+    </style>
+</head>
+<body>
+    <div class="container mt-4">
+        <div class="row">
+            <div class="col-12">
+                <div class="d-flex justify-content-between align-items-center mb-4">
+                    <h1>Nifty 50 Stock Scanner</h1>
+                    <div>
+                        <span class="badge bg-{{ 'success' if market_status == 'OPEN' else 'danger' }}">Market {{ market_status }}</span>
+                        <button class="btn btn-sm btn-primary ms-2" id="refreshBtn">Refresh Data</button>
+                    </div>
+                </div>
+                
+                {% if error %}
+                <div class="alert alert-danger">{{ error }}</div>
+                {% endif %}
+                
+                <div class="card">
+                    <div class="card-header d-flex justify-content-between align-items-center">
+                        <h5 class="mb-0">Stock Recommendations</h5>
+                        <small>Last Updated: {{ last_updated }}</small>
+                    </div>
+                    <div class="card-body">
+                        {% if dataframe_summary is not none %}
+                        <div class="table-responsive" style="max-height: 400px; overflow-y: auto;">
+                            <table class="table table-striped table-hover">
+                                <thead>
+                                    <tr>
+                                        <th>Symbol</th>
+                                        <th>Current Price</th>
+                                        <th>Change</th>
+                                        <th>Signal</th>
+                                        <th>Target</th>
+                                    </tr>
+                                </thead>
+                                <tbody>
+                                    {% for _, row in dataframe_summary.iterrows() %}
+                                    <tr class="signal-{{ row['Signal'] }}">
+                                        <td>{{ row['Symbol'] }}</td>
+                                        <td>₹{{ row['CMP'] }}</td>
+                                        <td class="{{ 'up' if not row['% Change'].startswith('-') else 'down' }}">{{ row['% Change'] }}</td>
+                                        <td>{{ row['Signal'] }}</td>
+                                        <td>{{ '₹' + row['Target'] if row['Target'] != 'N/A' else 'N/A' }}</td>
+                                    </tr>
+                                    {% endfor %}
+                                </tbody>
+                            </table>
+                        </div>
+                        {% else %}
+                        <p>No stock data available.</p>
+                        {% endif %}
+                    </div>
+                </div>
+                
+                <div class="row">
+                    <!-- Paper Trading Portfolio -->
+                    <div class="col-md-6">
+                        <div class="card">
+                            <div class="card-header">
+                                <h5 class="mb-0">Paper Trading Portfolio</h5>
+                            </div>
+                            <div class="card-body">
+                                {% if paper_portfolio %}
+                                <div class="mb-3">
+                                    <h6>Summary</h6>
+                                    <table class="table table-sm">
+                                        <tr>
+                                            <td>Total Value:</td>
+                                            <td>₹{{ "{:,.2f}".format(paper_portfolio.total_value) }}</td>
+                                        </tr>
+                                        <tr>
+                                            <td>Cash:</td>
+                                            <td>₹{{ "{:,.2f}".format(paper_portfolio.cash) }}</td>
+                                        </tr>
+                                        <tr>
+                                            <td>Returns:</td>
+                                            <td class="{{ 'up' if paper_portfolio.total_value > initial_capital else 'down' }}">
+                                                {{ "{:,.2f}".format((paper_portfolio.total_value - initial_capital) / initial_capital * 100) }}%
+                                            </td>
+                                        </tr>
+                                    </table>
+                                </div>
+                                
+                                {% if paper_portfolio.holdings %}
+                                <h6>Holdings</h6>
+                                <div class="table-responsive">
+                                    <table class="table table-sm table-striped">
+                                        <thead>
+                                            <tr>
+                                                <th>Symbol</th>
+                                                <th>Shares</th>
+                                                <th>Avg Cost</th>
+                                                <th>Current</th>
+                                                <th>P&L</th>
+                                            </tr>
+                                        </thead>
+                                        <tbody>
+                                            {% for holding in paper_portfolio.holdings %}
+                                            <tr>
+                                                <td>{{ holding.symbol }}</td>
+                                                <td>{{ holding.shares }}</td>
+                                                <td>₹{{ "{:,.2f}".format(holding.avg_price) }}</td>
+                                                <td>₹{{ "{:,.2f}".format(holding.current_price) }}</td>
+                                                <td class="{{ 'up' if holding.pnl >= 0 else 'down' }}">
+                                                    {{ "{:,.2f}".format(holding.pnl_pct) }}%
+                                                </td>
+                                            </tr>
+                                            {% endfor %}
+                                        </tbody>
+                                    </table>
+                                </div>
+                                {% else %}
+                                <p>No current holdings.</p>
+                                {% endif %}
+                                {% else %}
+                                <p>Portfolio data not available.</p>
+                                {% endif %}
+                            </div>
+                        </div>
+                    </div>
+                    
+                    <!-- Backtest Results -->
+                    <div class="col-md-6">
+                        <div class="card">
+                            <div class="card-header">
+                                <h5 class="mb-0">Backtest Results</h5>
+                            </div>
+                            <div class="card-body">
+                                {% if backtest_results and not backtest_results.get('error') %}
+                                <div class="mb-3">
+                                    <h6>{{ backtest_results.symbol }}</h6>
+                                    <table class="table table-sm">
+                                        <tr>
+                                            <td>Period:</td>
+                                            <td>{{ backtest_results.start_date.strftime('%Y-%m-%d') }} to {{ backtest_results.end_date.strftime('%Y-%m-%d') }}</td>
+                                        </tr>
+                                        <tr>
+                                            <td>Strategy Return:</td>
+                                            <td class="{{ 'up' if backtest_results.return > 0 else 'down' }}">
+                                                {{ "{:,.2f}".format(backtest_results.return) }}%
+                                            </td>
+                                        </tr>
+                                        <tr>
+                                            <td>Buy & Hold Return:</td>
+                                            <td class="{{ 'up' if backtest_results.buy_and_hold_return > 0 else 'down' }}">
+                                                {{ "{:,.2f}".format(backtest_results.buy_and_hold_return) }}%
+                                            </td>
+                                        </tr>
+                                    </table>
+                                </div>
+                                
+                                <h6>Recent Trades</h6>
+                                <div class="table-responsive" style="max-height: 200px; overflow-y: auto;">
+                                    <table class="table table-sm table-striped">
+                                        <thead>
+                                            <tr>
+                                                <th>Date</th>
+                                                <th>Action</th>
+                                                <th>Price</th>
+                                                <th>Shares</th>
+                                                <th>Value</th>
+                                            </tr>
+                                        </thead>
+                                        <tbody>
+                                            {% for trade in backtest_results.trades[-10:] %}
+                                            <tr>
+                                                <td>{{ trade.date.strftime('%Y-%m-%d') }}</td>
+                                                <td class="{{ 'up' if trade.action == 'BUY' else 'down' }}">{{ trade.action }}</td>
+                                                <td>₹{{ "{:,.2f}".format(trade.price) }}</td>
+                                                <td>{{ trade.shares }}</td>
+                                                <td>₹{{ "{:,.2f}".format(trade.value) }}</td>
+                                            </tr>
+                                            {% endfor %}
+                                        </tbody>
+                                    </table>
+                                </div>
+                                {% else %}
+                                <p>{{ backtest_results.get('error', 'Backtest data not available.') }}</p>
+                                {% endif %}
+                            </div>
+                        </div>
+                    </div>
+                </div>
+                
+                <!-- Recent Trades -->
+                <div class="card">
+                    <div class="card-header">
+                        <h5 class="mb-0">Recent Trades (Paper Portfolio)</h5>
+                    </div>
+                    <div class="card-body">
+                        {% if trades_executed %}
+                        <div class="table-responsive">
+                            <table class="table table-striped">
+                                <thead>
+                                    <tr>
+                                        <th>Time</th>
+                                        <th>Symbol</th>
+                                        <th>Action</th>
+                                        <th>Shares</th>
+                                        <th>Price</th>
+                                        <th>Total</th>
+                                    </tr>
+                                </thead>
+                                <tbody>
+                                    {% for trade in trades_executed %}
+                                    <tr>
+                                        <td>{{ trade.timestamp.strftime('%Y-%m-%d %H:%M') }}</td>
+                                        <td>{{ trade.symbol }}</td>
+                                        <td class="{{ 'up' if trade.action == 'BUY' else 'down' }}">{{ trade.action }}</td>
+                                        <td>{{ trade.shares }}</td>
+                                        <td>₹{{ "{:,.2f}".format(trade.price) }}</td>
+                                        <td>₹{{ "{:,.2f}".format(trade.total) }}</td>
+                                    </tr>
+                                    {% endfor %}
+                                </tbody>
+                            </table>
+                        </div>
+                        {% else %}
+                        <p>No recent trades.</p>
+                        {% endif %}
+                    </div>
+                </div>
+            </div>
+        </div>
+    </div>
+    
+    <script src="https://cdn.jsdelivr.net/npm/bootstrap@5.3.0-alpha1/dist/js/bootstrap.bundle.min.js"></script>
+    <script>
+        document.getElementById('refreshBtn').addEventListener('click', function() {
+            this.disabled = true;
+            this.innerHTML = '<span class="spinner-border spinner-border-sm" role="status" aria-hidden="true"></span> Refreshing...';
+            
+            fetch('/refresh')
+                .then(response => response.json())
+                .then(data => {
+                    if(data.status === 'success') {
+                        window.location.reload();
+                    } else {
+                        alert('Error refreshing data: ' + data.message);
+                        this.disabled = false;
+                        this.innerHTML = 'Refresh Data';
+                    }
+                })
+                .catch(error => {
+                    alert('Network error: ' + error);
+                    this.disabled = false;
+                    this.innerHTML = 'Refresh Data';
+                });
+        });
+    </script>
+</body>
+</html>""")
+            logging.info(f"Created basic index.html template")
+        except Exception as e:
+            logging.error(f"Failed to create index.html template: {e}", exc_info=True)
+            return False
+    
+    return True
+
+# --- Entry Point ---
 if __name__ == '__main__':
-    logging.info("Performing initial data load on startup...")
-    process_all_data()
-    logging.info("Initial data load complete. Web server starting (via Gunicorn on Render)...")
+    try:
+        # Ensure templates directory and files exist
+        if not ensure_template_directory():
+            logging.error("Failed to set up templates. Exiting.")
+            exit(1)
+        
+        # Initial data processing
+        process_all_data()
+        
+        # Start the background scheduler
+        scheduler = create_scheduler()
+        if not scheduler:
+            logging.warning("Scheduler initialization failed, continuing without automatic updates.")
+        
+        # Start Flask app
+        port = int(os.environ.get('PORT', 5000))
+        logging.info(f"Starting Flask app on port {port}")
+        app.run(host='0.0.0.0', port=port, debug=False)
+    except Exception as e:
+        logging.critical(f"Fatal error during application startup: {e}", exc_info=True)
