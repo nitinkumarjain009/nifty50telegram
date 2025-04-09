@@ -14,7 +14,8 @@ import plotly.io as pio
 from plotly.subplots import make_subplots
 import warnings
 warnings.filterwarnings('ignore')
-from telegram import Bot
+from telegram import Bot, Update
+from telegram.ext import Updater, CommandHandler, MessageHandler, Filters, CallbackContext
 
 # Configuration
 TELEGRAM_BOT_TOKEN = "YOUR_TELEGRAM_BOT_TOKEN"
@@ -32,7 +33,9 @@ app = Flask(__name__, template_folder=TEMPLATES_DIR)
 app.config['JSON_SORT_KEYS'] = False
 
 # Initialize Telegram bot
-bot = telepot.Bot(TELEGRAM_BOT_TOKEN)
+bot = Bot(TELEGRAM_BOT_TOKEN)
+updater = Updater(TELEGRAM_BOT_TOKEN)
+dispatcher = updater.dispatcher
 
 # Global variables to store recommendations and analysis
 current_recommendations = {}
@@ -347,15 +350,15 @@ def send_telegram_message(message, target=None):
     try:
         if target is None:
             # Send to personal chat ID
-            bot.sendMessage(TELEGRAM_CHAT_ID, message, parse_mode='Markdown')
+            bot.send_message(chat_id=TELEGRAM_CHAT_ID, text=message, parse_mode='Markdown')
             print(f"Message sent to Telegram chat: {message[:50]}...")
             
             # Also send to group
-            bot.sendMessage(TELEGRAM_GROUP, message, parse_mode='Markdown')
+            bot.send_message(chat_id=TELEGRAM_GROUP, text=message, parse_mode='Markdown')
             print(f"Message sent to Telegram group {TELEGRAM_GROUP}: {message[:50]}...")
         else:
             # Send to specified target
-            bot.sendMessage(target, message, parse_mode='Markdown')
+            bot.send_message(chat_id=target, text=message, parse_mode='Markdown')
             print(f"Message sent to Telegram {target}: {message[:50]}...")
     except Exception as e:
         print(f"Error sending Telegram message: {e}")
@@ -366,17 +369,17 @@ def send_telegram_photo(photo_path, caption, target=None):
         if target is None:
             # Send to personal chat ID
             with open(photo_path, 'rb') as photo:
-                bot.sendPhoto(TELEGRAM_CHAT_ID, photo, caption=caption)
+                bot.send_photo(chat_id=TELEGRAM_CHAT_ID, photo=photo, caption=caption)
             print(f"Photo sent to Telegram chat: {caption[:50]}...")
             
             # Also send to group
             with open(photo_path, 'rb') as photo:
-                bot.sendPhoto(TELEGRAM_GROUP, photo, caption=caption)
+                bot.send_photo(chat_id=TELEGRAM_GROUP, photo=photo, caption=caption)
             print(f"Photo sent to Telegram group {TELEGRAM_GROUP}: {caption[:50]}...")
         else:
             # Send to specified target
             with open(photo_path, 'rb') as photo:
-                bot.sendPhoto(target, photo, caption=caption)
+                bot.send_photo(chat_id=target, photo=photo, caption=caption)
             print(f"Photo sent to Telegram {target}: {caption[:50]}...")
     except Exception as e:
         print(f"Error sending Telegram photo: {e}")
@@ -574,134 +577,127 @@ def api_daily():
 def run_flask():
     """Run Flask app in a separate thread"""
     app.run(host='0.0.0.0', port=int(os.environ.get('PORT', 8080)))
+def handle_command_start(update: Update, context: CallbackContext):
+    response = (
+        "*Welcome to Nifty 50 Stock Analyzer Bot!*\n\n"
+        "Available commands:\n"
+        "/status - Check bot status\n"
+        "/recommendations - Get current recommendations\n"
+        "/daily - Get daily analysis\n"
+        "/analyze <symbol> - Analyze a specific stock"
+    )
+    update.message.reply_markdown(response)
 
-def handle_message(msg):
-    """Handle incoming Telegram messages"""
-    content_type, chat_type, chat_id = telepot.glance(msg)
+def handle_command_status(update: Update, context: CallbackContext):
+    status = (
+        "*Bot Status*\n\n"
+        f"Current time: {datetime.datetime.now(IST_TIMEZONE).strftime('%Y-%m-%d %H:%M:%S')} IST\n"
+        f"Market hours: {MARKET_OPEN_TIME} - {MARKET_CLOSE_TIME} IST\n"
+        f"Market is currently {'OPEN' if is_market_hours() else 'CLOSED'}\n"
+        f"Last analysis update: {last_update_time or 'Not yet run'}\n"
+        f"Number of stocks being monitored: {len(load_stock_data()) if not load_stock_data().empty else 0}\n"
+        f"Check interval: Every {CHECK_INTERVAL_MINUTES} minutes during market hours"
+    )
+    update.message.reply_markdown(status)
+
+def handle_command_recommendations(update: Update, context: CallbackContext):
+    if not current_recommendations:
+        update.message.reply_markdown("No recommendations available yet. Please wait for the next analysis run.")
+        return
+        
+    # Get BUY and SELL recommendations only
+    buy_sell_recs = [r for r in current_recommendations if r.get('recommendations', {}).get('OVERALL') in ['BUY', 'SELL']]
     
-    if content_type != 'text':
+    if not buy_sell_recs:
+        update.message.reply_markdown("No BUY or SELL recommendations in the latest analysis.")
+        return
+        
+    response = f"*Latest Recommendations ({last_update_time})*\n\n"
+    
+    for rec in buy_sell_recs:
+        response += f"*{rec['symbol']} - {rec['recommendations']['OVERALL']}*\n"
+        response += f"Price: ₹{rec['price']}\n"
+        response += f"Target: ₹{rec['target_price']}\n"
+        response += f"Stop Loss: ₹{rec['stop_loss']}\n\n"
+        
+    update.message.reply_markdown(response)
+
+def handle_command_daily(update: Update, context: CallbackContext):
+    if not daily_analysis:
+        update.message.reply_markdown("No daily analysis available yet. It will be generated after market hours.")
+        return
+        
+    # Format daily analysis message
+    message = f"*Daily Market Analysis - {daily_analysis['date']}*\n\n"
+    
+    message += f"*BUY Recommendations ({len(daily_analysis['buy'])}):*\n"
+    for i, rec in enumerate(daily_analysis['buy'][:10], 1):
+        message += f"{i}. {rec['symbol']} at ₹{rec['price']} (Target: ₹{rec['target_price']}, SL: ₹{rec['stop_loss']}) - Strength: {rec['strength']}\n"
+    
+    message += f"\n*SELL Recommendations ({len(daily_analysis['sell'])}):*\n"
+    for i, rec in enumerate(daily_analysis['sell'][:10], 1):
+       message += f"{i}. {rec['symbol']} at ₹{rec['price']} (Target: ₹{rec['target_price']}, SL: ₹{rec['stop_loss']}) - Strength: {rec['strength']}\n"
+    
+    message += f"\n*HOLD Recommendations: {daily_analysis['hold']} stocks*"
+    
+    update.message.reply_markdown(message)
+
+def handle_command_analyze(update: Update, context: CallbackContext):
+    if not context.args or len(context.args) < 1:
+        update.message.reply_text("Please provide a symbol to analyze. Example: /analyze RELIANCE")
+        return
+        
+    # Extract the symbol from the command
+    symbol = context.args[0].upper().strip()
+    
+    # Check if symbol exists in our data
+    stocks_df = load_stock_data()
+    if stocks_df.empty or symbol not in stocks_df['symbol'].values:
+        update.message.reply_markdown(f"Symbol {symbol} not found in the database.")
         return
     
-    command = msg['text'].lower()
+    update.message.reply_markdown(f"Analyzing {symbol}... Please wait.")
     
-    if command == '/start':
-        response = (
-            "*Welcome to Nifty 50 Stock Analyzer Bot!*\n\n"
-            "Available commands:\n"
-            "/status - Check bot status\n"
-            "/recommendations - Get current recommendations\n"
-            "/daily - Get daily analysis\n"
-            "/analyze <symbol> - Analyze a specific stock"
-        )
-        bot.sendMessage(chat_id, response, parse_mode='Markdown')
-    
-    elif command == '/status':
-        status = (
-            "*Bot Status*\n\n"
-            f"Current time: {datetime.datetime.now(IST_TIMEZONE).strftime('%Y-%m-%d %H:%M:%S')} IST\n"
-            f"Market hours: {MARKET_OPEN_TIME} - {MARKET_CLOSE_TIME} IST\n"
-            f"Market is currently {'OPEN' if is_market_hours() else 'CLOSED'}\n"
-            f"Last analysis update: {last_update_time or 'Not yet run'}\n"
-            f"Number of stocks being monitored: {len(load_stock_data()) if not load_stock_data().empty else 0}\n"
-            f"Check interval: Every {CHECK_INTERVAL_MINUTES} minutes during market hours"
-        )
-        bot.sendMessage(chat_id, status, parse_mode='Markdown')
-    
-    elif command == '/recommendations':
-        if not current_recommendations:
-            bot.sendMessage(chat_id, "No recommendations available yet. Please wait for the next analysis run.", parse_mode='Markdown')
+    try:
+        # Fetch data for the symbol
+        stock_data = fetch_latest_data(symbol)
+        
+        if stock_data.empty:
+            update.message.reply_markdown(f"Could not fetch data for {symbol}.")
             return
             
-        # Get BUY and SELL recommendations only
-        buy_sell_recs = [r for r in current_recommendations if r.get('recommendations', {}).get('OVERALL') in ['BUY', 'SELL']]
+        # Calculate indicators and recommendations
+        stock_data = calculate_indicators(stock_data)
+        recommendations = get_recommendations_with_targets(stock_data, symbol)
         
-        if not buy_sell_recs:
-            bot.sendMessage(chat_id, "No BUY or SELL recommendations in the latest analysis.", parse_mode='Markdown')
-            return
+        # Format and send recommendation message
+        message = format_recommendations_message(recommendations)
+        update.message.reply_markdown(message)
+        
+        # Create and send chart
+        fig = create_technical_chart(stock_data, symbol)
+        if fig:
+            chart_path = f"static/{symbol}_chart.png"
+            pio.write_image(fig, chart_path)
             
-        response = f"*Latest Recommendations ({last_update_time})*\n\n"
-        
-        for rec in buy_sell_recs:
-            response += f"*{rec['symbol']} - {rec['recommendations']['OVERALL']}*\n"
-            response += f"Price: ₹{rec['price']}\n"
-            response += f"Target: ₹{rec['target_price']}\n"
-            response += f"Stop Loss: ₹{rec['stop_loss']}\n\n"
-            
-        bot.sendMessage(chat_id, response, parse_mode='Markdown')
-    
-    elif command == '/daily':
-        if not daily_analysis:
-            bot.sendMessage(chat_id, "No daily analysis available yet. It will be generated after market hours.", parse_mode='Markdown')
-            return
-            
-        # Format daily analysis message (same as what's sent automatically)
-        message = f"*Daily Market Analysis - {daily_analysis['date']}*\n\n"
-        
-        message += f"*BUY Recommendations ({len(daily_analysis['buy'])}):*\n"
-        for i, rec in enumerate(daily_analysis['buy'][:10], 1):
-            message += f"{i}. {rec['symbol']} at ₹{rec['price']} (Target: ₹{rec['target_price']}, SL: ₹{rec['stop_loss']}) - Strength: {rec['strength']}\n"
-        
-        message += f"\n*SELL Recommendations ({len(daily_analysis['sell'])}):*\n"
-        for i, rec in enumerate(daily_analysis['sell'][:10], 1):
-           message += f"{i}. {rec['symbol']} at ₹{rec['price']} (Target: ₹{rec['target_price']}, SL: ₹{rec['stop_loss']}) - Strength: {rec['strength']}\n"
-        
-        message += f"\n*HOLD Recommendations: {daily_analysis['hold']} stocks*"
-        
-        bot.sendMessage(chat_id, message, parse_mode='Markdown')
-    
-    elif command.startswith('/analyze '):
-        # Extract the symbol from the command
-        symbol = command.split(' ')[1].upper().strip()
-        
-        # Check if symbol exists in our data
-        stocks_df = load_stock_data()
-        if stocks_df.empty or symbol not in stocks_df['symbol'].values:
-            bot.sendMessage(chat_id, f"Symbol {symbol} not found in the database.", parse_mode='Markdown')
-            return
-        
-        bot.sendMessage(chat_id, f"Analyzing {symbol}... Please wait.", parse_mode='Markdown')
-        
-        try:
-            # Fetch data for the symbol
-            stock_data = fetch_latest_data(symbol)
-            
-            if stock_data.empty:
-                bot.sendMessage(chat_id, f"Could not fetch data for {symbol}.", parse_mode='Markdown')
-                return
+            with open(chart_path, 'rb') as photo:
+                update.message.reply_photo(photo, caption=f"Technical chart for {symbol}")
                 
-            # Calculate indicators and recommendations
-            stock_data = calculate_indicators(stock_data)
-            recommendations = get_recommendations_with_targets(stock_data, symbol)
-            
-            # Format and send recommendation message
-            message = format_recommendations_message(recommendations)
-            bot.sendMessage(chat_id, message, parse_mode='Markdown')
-            
-            # Create and send chart
-            fig = create_technical_chart(stock_data, symbol)
-            if fig:
-                chart_path = f"static/{symbol}_chart.png"
-                pio.write_image(fig, chart_path)
-                
-                with open(chart_path, 'rb') as photo:
-                    bot.sendPhoto(chat_id, photo, caption=f"Technical chart for {symbol}")
-                    
-        except Exception as e:
-            error_message = f"Error analyzing {symbol}: {e}"
-            print(error_message)
-            bot.sendMessage(chat_id, f"❌ {error_message}", parse_mode='Markdown')
-    
-    else:
-        # Unknown command
-        response = (
-            "I don't understand that command. Available commands:\n"
-            "/start - Show help message\n"
-            "/status - Check bot status\n"
-            "/recommendations - Get current recommendations\n"
-            "/daily - Get daily analysis\n"
-            "/analyze <symbol> - Analyze a specific stock"
-        )
-        bot.sendMessage(chat_id, response)
+    except Exception as e:
+        error_message = f"Error analyzing {symbol}: {e}"
+        print(error_message)
+        update.message.reply_markdown(f"❌ {error_message}")
+
+def handle_unknown(update: Update, context: CallbackContext):
+    response = (
+        "I don't understand that command. Available commands:\n"
+        "/start - Show help message\n"
+        "/status - Check bot status\n"
+        "/recommendations - Get current recommendations\n"
+        "/daily - Get daily analysis\n"
+        "/analyze <symbol> - Analyze a specific stock"
+    )
+    update.message.reply_text(response)
 
 def create_directories():
     """Create necessary directories if they don't exist"""
@@ -990,7 +986,16 @@ def main():
         initialize_example_csv()
         
         # Start Telegram message handler
-        MessageLoop(bot, handle_message).run_as_thread()
+        # Register command handlers
+dispatcher.add_handler(CommandHandler("start", handle_command_start))
+dispatcher.add_handler(CommandHandler("status", handle_command_status))
+dispatcher.add_handler(CommandHandler("recommendations", handle_command_recommendations))
+dispatcher.add_handler(CommandHandler("daily", handle_command_daily))
+dispatcher.add_handler(CommandHandler("analyze", handle_command_analyze))
+dispatcher.add_handler(MessageHandler(Filters.text & ~Filters.command, handle_unknown))
+
+# Start the bot
+updater.start_polling()
         print(f"Telegram bot started and listening at {datetime.datetime.now(IST_TIMEZONE).strftime('%Y-%m-%d %H:%M:%S')}")
         
         # Welcome message on bot startup
