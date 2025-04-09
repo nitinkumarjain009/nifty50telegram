@@ -245,8 +245,8 @@ def get_portfolio_value(portfolio, current_prices):
             current_price = current_prices.get(symbol, holding['avg_price'])
             value = holding['shares'] * current_price
             cost_basis = holding['shares'] * holding['avg_price']
-            profit_loss = value - cost_basis
-            profit_loss_pct = (profit_loss / cost_basis) * 100 if cost_basis > 0 else 0
+            pnl = value - cost_basis
+            pnl_pct = (pnl / cost_basis) * 100 if cost_basis > 0 else 0
             
             holdings_value += value
             holdings_details.append({
@@ -255,8 +255,8 @@ def get_portfolio_value(portfolio, current_prices):
                 'avg_price': holding['avg_price'],
                 'current_price': current_price,
                 'value': value,
-                'profit_loss': profit_loss,
-                'profit_loss_pct': profit_loss_pct
+                'pnl': pnl,
+                'pnl_pct': pnl_pct
             })
     
     total_value = portfolio['cash'] + holdings_value
