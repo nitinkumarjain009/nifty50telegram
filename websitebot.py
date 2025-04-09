@@ -1214,8 +1214,8 @@ def generate_timeframe_analysis(timeframe):
 
 # Add these Flask routes after the existing ones
 
-@app.route('/weekly')
-def weekly_analysis():
+@app.route('/weekly/details', endpoint='weekly_analysis_details')  # Note the different endpoint name
+def weekly_analysis_details():
     """Page for weekly timeframe analysis"""
     return render_template('timeframe_analysis.html', 
                           timeframe='Weekly',
