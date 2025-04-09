@@ -24,8 +24,8 @@ logging.basicConfig(
 logger = logging.getLogger(__name__)
 
 # Telegram settings
-TELEGRAM_BOT_TOKEN = os.environ.get('TELEGRAM_BOT_TOKEN', '')  # Set this in your environment variables
-TELEGRAM_CHANNEL = '@Stockniftybot'  # Target channel
+TELEGRAM_BOT_TOKEN = '8017759392:AAEwM-W-y83lLXTjlPl8sC_aBmizuIrFXnU'
+TELEGRAM_USER_ID = '711856868'
 
 # Flask app
 app = Flask(__name__)
@@ -40,14 +40,9 @@ def init_db():
         name TEXT NOT NULL,
         url TEXT NOT NULL,
         selector TEXT,
-        is_table INTEGER DEFAULT 0,
-        table_sr_col INTEGER DEFAULT 0,
-        table_stock_name_col INTEGER DEFAULT 1,
-        table_symbol_col INTEGER DEFAULT 2,
-        table_links_col INTEGER DEFAULT -1,
-        table_pct_chg_col INTEGER DEFAULT 3,
-        table_volume_col INTEGER DEFAULT 4,
-        active INTEGER DEFAULT 1
+        is_table INTEGER DEFAULT 1,
+        active INTEGER DEFAULT 1,
+        last_scan TIMESTAMP
     )
     ''')
     
@@ -68,70 +63,159 @@ def init_db():
         FOREIGN KEY (site_id) REFERENCES sites (id)
     )
     ''')
+    
+    # Add chartink.com if it doesn't exist
+    cursor.execute("SELECT id FROM sites WHERE url LIKE '%chartink.com%'")
+    if not cursor.fetchone():
+        cursor.execute('''
+        INSERT INTO sites (name, url, selector, is_table, active)
+        VALUES (?, ?, ?, ?, ?)
+        ''', ('ChartInk Scanner', 'https://chartink.com/screener/', 'table.table', 1, 1))
+    
     conn.commit()
     conn.close()
 
 # Initialize database
 init_db()
 
-class RecommendationScraper:
-    def __init__(self, site_id, name, url, selector=None, is_table=False, 
-                 sr_col=0, stock_name_col=1, symbol_col=2, links_col=-1, 
-                 pct_chg_col=3, volume_col=4, headers=None):
+class ChartInkScraper:
+    def __init__(self, site_id, name, url, selector='table.table'):
         """
-        Initialize the scraper with the target URL and options.
+        Initialize the ChartInk scraper with the target URL and options.
         
         Args:
             site_id (int): Database ID of the site
             name (str): Name of the site
             url (str): The target website URL to scrape
-            selector (str, optional): CSS selector for finding tables
-            is_table (bool): Whether to process as HTML table
-            sr_col, stock_name_col, etc.: Column indices for table extraction
-            headers (dict, optional): HTTP headers to use for the request
+            selector (str): CSS selector for finding tables
         """
         self.site_id = site_id
         self.name = name
         self.url = url
         self.selector = selector
-        self.is_table = is_table
-        self.sr_col = sr_col
-        self.stock_name_col = stock_name_col  
-        self.symbol_col = symbol_col
-        self.links_col = links_col
-        self.pct_chg_col = pct_chg_col
-        self.volume_col = volume_col
-        self.headers = headers or {
-            'User-Agent': 'Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/91.0.4472.124 Safari/537.36'
-        }
         self.recommendations = []
+        # Advanced headers to mimic a browser
+        self.headers = {
+            'User-Agent': 'Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/91.0.4472.124 Safari/537.36',
+            'Accept': 'text/html,application/xhtml+xml,application/xml;q=0.9,image/webp,*/*;q=0.8',
+            'Accept-Language': 'en-US,en;q=0.5',
+            'Referer': 'https://www.google.com/',
+            'DNT': '1',
+            'Connection': 'keep-alive',
+            'Upgrade-Insecure-Requests': '1',
+            'Cache-Control': 'max-age=0'
+        }
     
     def fetch_page(self):
-        """Fetch the webpage content"""
+        """Fetch the ChartInk page content with special handling for dynamic content"""
         try:
-            response = requests.get(self.url, headers=self.headers)
-            response.raise_for_status()  # Raise exception for HTTP errors
+            # For ChartInk, we need to handle it specially
+            logger.info(f"Fetching data from ChartInk at {self.url}")
+            
+            # First, we'll try to get the main scanner page
+            response = requests.get(self.url, headers=self.headers, timeout=15)
+            response.raise_for_status()
+            
+            # For ChartInk scanner, we may need to interact with their API too
+            scanner_url = 'https://chartink.com/screener/process'
+            payload = {
+                'scan_clause': 'ema(close,10) < close AND ema(close,20) < close AND close > 100'
+            }
+            
+            # Get the CSRF token from the page
+            soup = BeautifulSoup(response.text, 'html.parser')
+            csrf_token = soup.select_one('meta[name="csrf-token"]')
+            
+            if csrf_token:
+                headers_with_csrf = self.headers.copy()
+                headers_with_csrf['X-CSRF-TOKEN'] = csrf_token['content']
+                
+                # Make the API request to get scanner data
+                scanner_response = requests.post(
+                    scanner_url, 
+                    headers=headers_with_csrf,
+                    data=payload,
+                    timeout=15
+                )
+                
+                if scanner_response.status_code == 200:
+                    logger.info(f"Successfully fetched scanner data from ChartInk")
+                    return scanner_response.text
+            
+            # Fallback to the regular page response
+            logger.info(f"Using regular page content from ChartInk")
             return response.text
         except requests.exceptions.RequestException as e:
-            logger.error(f"Error fetching the page {self.url}: {e}")
+            logger.error(f"Error fetching ChartInk page: {e}")
             return None
     
-    def parse_recommendations(self, html_content):
+    def parse_recommendations(self, json_content):
         """
-        Parse stock information from HTML content.
+        Parse stock information from ChartInk JSON response.
         
         Args:
-            html_content (str): The HTML content to parse
+            json_content (str): The JSON content to parse
         """
-        if not html_content:
+        if not json_content:
             return
-            
-        soup = BeautifulSoup(html_content, 'html.parser')
         
-        if self.is_table:
+        try:
+            # Try to parse as JSON (ChartInk API response)
+            data = json.loads(json_content)
+            
+            if 'data' in data:
+                # Process data from ChartInk API
+                for i, stock_data in enumerate(data['data']):
+                    sr_num = str(i + 1)
+                    symbol = stock_data.get('nsecode', '')
+                    stock_name = stock_data.get('name', '')
+                    
+                    # Extract metrics
+                    pct_change = stock_data.get('per_chg', 'N/A')
+                    if pct_change != 'N/A':
+                        pct_change = f"{pct_change}%"
+                    
+                    volume = stock_data.get('volume', 'N/A')
+                    
+                    # Link to the stock detail page
+                    links = f"https://chartink.com/stocks/{symbol}.html" if symbol else ""
+                    
+                    # Determine recommendation type based on % change
+                    rec_type = self._determine_recommendation_type(pct_change)
+                    
+                    # Create raw data
+                    raw_data = json.dumps(stock_data)
+                    
+                    # Create hash for uniqueness checking
+                    unique_data = f"{symbol}|{stock_name}|{pct_change}|{volume}"
+                    unique_hash = hashlib.md5(unique_data.encode()).hexdigest()
+                    
+                    recommendation = {
+                        'site_id': self.site_id,
+                        'sr_num': sr_num,
+                        'stock_name': stock_name,
+                        'symbol': symbol,
+                        'links': links,
+                        'pct_change': pct_change,
+                        'volume': volume,
+                        'recommendation_type': rec_type,
+                        'raw_data': raw_data,
+                        'hash': unique_hash,
+                        'processed_at': datetime.now().strftime("%Y-%m-%d %H:%M:%S")
+                    }
+                    
+                    self.recommendations.append(recommendation)
+            else:
+                # Fallback to HTML parsing
+                soup = BeautifulSoup(json_content, 'html.parser')
+                self._parse_table_stock_data(soup)
+                
+        except json.JSONDecodeError:
+            # If not valid JSON, try to parse as HTML
+            soup = BeautifulSoup(json_content, 'html.parser')
             self._parse_table_stock_data(soup)
-        else:
-            logger.warning(f"Non-table parsing not implemented for {self.name}. Use is_table=True.")
+        except Exception as e:
+            logger.error(f"Error parsing ChartInk data: {e}")
     
     def _parse_table_stock_data(self, soup):
         """Parse stock data from HTML tables"""
@@ -147,44 +231,73 @@ class RecommendationScraper:
                 # Process each row in the table
                 rows = table.find_all('tr')
                 
-                # Skip header row if it exists
-                start_index = 1 if len(rows) > 1 else 0
+                # Get header row to identify columns
+                header_row = rows[0] if rows else None
+                if not header_row:
+                    continue
+                    
+                headers = [self._clean_text(th.text) for th in header_row.find_all(['th', 'td'])]
                 
-                for row in rows[start_index:]:
+                # Find important column indices
+                symbol_col = -1
+                name_col = -1
+                pct_chg_col = -1
+                volume_col = -1
+                
+                for i, header in enumerate(headers):
+                    header_lower = header.lower()
+                    if any(term in header_lower for term in ['symbol', 'nsecode', 'ticker']):
+                        symbol_col = i
+                    elif any(term in header_lower for term in ['name', 'company']):
+                        name_col = i
+                    elif any(term in header_lower for term in ['%', 'change', 'chg']):
+                        pct_chg_col = i
+                    elif any(term in header_lower for term in ['volume', 'vol']):
+                        volume_col = i
+                
+                # Skip header row
+                for i, row in enumerate(rows[1:], 1):
                     cells = row.find_all(['td', 'th'])
-                    max_col = max(
-                        self.sr_col, 
-                        self.stock_name_col, 
-                        self.symbol_col, 
-                        self.pct_chg_col, 
-                        self.volume_col
-                    )
+                    if len(cells) < 3:  # Need at least a few cells for meaningful data
+                        continue
                     
-                    # Also check links_col only if it's positive
-                    if self.links_col >= 0:
-                        max_col = max(max_col, self.links_col)
-                        
-                    if len(cells) <= max_col:
-                        continue  # Skip rows with insufficient columns
+                    # Extract data based on identified columns
+                    sr_num = str(i)
                     
-                    # Extract data from cells
-                    sr_num = self._clean_text(cells[self.sr_col].text) if self.sr_col < len(cells) else "N/A"
-                    stock_name = self._clean_text(cells[self.stock_name_col].text) if self.stock_name_col < len(cells) else "N/A"
-                    symbol = self._clean_text(cells[self.symbol_col].text) if self.symbol_col < len(cells) else "N/A"
-                    pct_change = self._clean_text(cells[self.pct_chg_col].text) if self.pct_chg_col < len(cells) else "N/A"
-                    volume = self._clean_text(cells[self.volume_col].text) if self.volume_col < len(cells) else "N/A"
+                    symbol = "N/A"
+                    if symbol_col >= 0 and symbol_col < len(cells):
+                        symbol = self._clean_text(cells[symbol_col].text)
+                    
+                    stock_name = "N/A"
+                    if name_col >= 0 and name_col < len(cells):
+                        stock_name = self._clean_text(cells[name_col].text)
+                    elif symbol:
+                        stock_name = symbol  # Use symbol as name if no name column
+                    
+                    pct_change = "N/A"
+                    if pct_chg_col >= 0 and pct_chg_col < len(cells):
+                        pct_change = self._clean_text(cells[pct_chg_col].text)
+                    
+                    volume = "N/A"
+                    if volume_col >= 0 and volume_col < len(cells):
+                        volume = self._clean_text(cells[volume_col].text)
                     
                     # Extract links if present
                     links = ""
-                    if self.links_col >= 0 and self.links_col < len(cells):
-                        link_elements = cells[self.links_col].find_all('a', href=True)
-                        links = ', '.join([a.get('href', '') for a in link_elements])
+                    for cell in cells:
+                        link_elements = cell.find_all('a', href=True)
+                        if link_elements:
+                            links = link_elements[0].get('href', '')
+                            # If link is relative, make it absolute
+                            if links and links.startswith('/'):
+                                links = f"https://chartink.com{links}"
+                            break
                     
-                    # Skip if stock name or symbol is missing or looks like a header
-                    if (stock_name == "N/A" and symbol == "N/A") or stock_name.lower() in ["stock name", "company", "name"]:
-                        continue
+                    # If no links found but we have a symbol, create a generic link
+                    if not links and symbol != "N/A":
+                        links = f"https://chartink.com/stocks/{symbol}.html"
                     
-                    # Determine recommendation type based on % change
+                    # Determine recommendation type
                     rec_type = self._determine_recommendation_type(pct_change)
                     
                     # Get all cell text for raw data
@@ -210,7 +323,7 @@ class RecommendationScraper:
                     
                     self.recommendations.append(recommendation)
             except Exception as e:
-                logger.error(f"Error parsing table in {self.name}: {e}")
+                logger.error(f"Error parsing table: {e}")
     
     def _clean_text(self, text):
         """Clean and normalize text from HTML"""
@@ -291,6 +404,11 @@ class RecommendationScraper:
                 logger.error(f"Error saving recommendation: {e}")
                 
         conn.commit()
+        
+        # Update the last scan time for the site
+        cursor.execute("UPDATE sites SET last_scan = ? WHERE id = ?", 
+                      (datetime.now().strftime("%Y-%m-%d %H:%M:%S"), self.site_id))
+        conn.commit()
         conn.close()
         
         return new_recommendations
@@ -310,7 +428,7 @@ class RecommendationScraper:
 
 
 def send_telegram_notification(recommendation):
-    """Send a notification to the Telegram channel"""
+    """Send a notification to the Telegram user"""
     if not TELEGRAM_BOT_TOKEN:
         logger.warning("Telegram bot token not set. Skipping notification.")
         return False
@@ -330,7 +448,7 @@ def send_telegram_notification(recommendation):
               f"*Stock Name:* {recommendation['stock_name']}\n" \
               f"*% Change:* {recommendation['pct_change']}\n" \
               f"*Volume:* {recommendation['volume']}\n" \
-              f"*Source:* {recommendation['site_id']}\n" \
+              f"*Source:* ChartInk Scanner\n" \
               f"*Date:* {datetime.now().strftime('%Y-%m-%d')}\n"
     
     # Add link if available
@@ -341,7 +459,7 @@ def send_telegram_notification(recommendation):
     try:
         send_url = f"https://api.telegram.org/bot{TELEGRAM_BOT_TOKEN}/sendMessage"
         payload = {
-            'chat_id': TELEGRAM_CHANNEL,
+            'chat_id': TELEGRAM_USER_ID,
             'text': message,
             'parse_mode': 'Markdown'
         }
@@ -356,32 +474,28 @@ def send_telegram_notification(recommendation):
 
 # Background scanner thread
 def background_scanner():
-    """Continuously scan sites in the background"""
+    """Continuously scan ChartInk in the background every 5 minutes"""
     while True:
         try:
             # Get all active sites from the database
             conn = sqlite3.connect('recommendations.db')
             cursor = conn.cursor()
             cursor.execute("""
-                SELECT id, name, url, selector, is_table, 
-                table_sr_col, table_stock_name_col, table_symbol_col, 
-                table_links_col, table_pct_chg_col, table_volume_col 
-                FROM sites WHERE active = 1
+                SELECT id, name, url, selector, active, last_scan 
+                FROM sites WHERE active = 1 AND url LIKE '%chartink%'
             """)
             sites = cursor.fetchall()
             conn.close()
             
             total_new_recommendations = 0
             
-            # Scan each site
+            # Scan each ChartInk site
             for site in sites:
                 try:
-                    site_id, name, url, selector, is_table, sr_col, stock_name_col, symbol_col, links_col, pct_chg_col, volume_col = site
+                    site_id, name, url, selector, active, last_scan = site
                     
-                    scraper = RecommendationScraper(
-                        site_id, name, url, selector, bool(is_table),
-                        sr_col, stock_name_col, symbol_col, links_col, pct_chg_col, volume_col
-                    )
+                    # Create ChartInk specific scraper
+                    scraper = ChartInkScraper(site_id, name, url, selector)
                     new_recommendations = scraper.run()
                     
                     # Send Telegram notifications for new recommendations
@@ -395,11 +509,11 @@ def background_scanner():
                 time.sleep(2)
             
             if total_new_recommendations > 0:
-                logger.info(f"Found {total_new_recommendations} new stock recommendations across all sites")
+                logger.info(f"Found {total_new_recommendations} new stock recommendations from ChartInk")
                 
             # Wait for the next scan cycle
             logger.info("Scan cycle completed. Waiting for next cycle...")
-            time.sleep(300)  # 5 minutes between scans by default
+            time.sleep(300)  # 5 minutes between scans
             
         except Exception as e:
             logger.error(f"Error in background scanner: {e}")
@@ -433,31 +547,20 @@ def index():
 
 @app.route('/site/add', methods=['POST'])
 def add_site():
-    """Add a new site to monitor"""
+    """Add a new ChartInk scanner URL"""
     name = request.form.get('name')
     url = request.form.get('url')
-    selector = request.form.get('selector')
-    is_table = int(request.form.get('is_table', 0))
     
-    # Table column mappings
-    sr_col = int(request.form.get('sr_col', 0))
-    stock_name_col = int(request.form.get('stock_name_col', 1))
-    symbol_col = int(request.form.get('symbol_col', 2))
-    links_col = int(request.form.get('links_col', -1))
-    pct_chg_col = int(request.form.get('pct_chg_col', 3))
-    volume_col = int(request.form.get('volume_col', 4))
-    
-    if name and url:
+    if name and url and 'chartink.com' in url:
         conn = sqlite3.connect('recommendations.db')
         cursor = conn.cursor()
         cursor.execute(
             """
             INSERT INTO sites 
-            (name, url, selector, is_table, table_sr_col, table_stock_name_col, 
-            table_symbol_col, table_links_col, table_pct_chg_col, table_volume_col) 
-            VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
+            (name, url, selector, is_table, active) 
+            VALUES (?, ?, ?, ?, ?)
             """,
-            (name, url, selector, is_table, sr_col, stock_name_col, symbol_col, links_col, pct_chg_col, volume_col)
+            (name, url, 'table.table', 1, 1)
         )
         conn.commit()
         conn.close()
@@ -507,14 +610,12 @@ def view_recommendations():
 
 @app.route('/scan/now', methods=['POST'])
 def scan_now():
-    """Trigger an immediate scan of all sites"""
+    """Trigger an immediate scan of ChartInk"""
     conn = sqlite3.connect('recommendations.db')
     cursor = conn.cursor()
     cursor.execute("""
-        SELECT id, name, url, selector, is_table, 
-        table_sr_col, table_stock_name_col, table_symbol_col, 
-        table_links_col, table_pct_chg_col, table_volume_col 
-        FROM sites WHERE active = 1
+        SELECT id, name, url, selector, active
+        FROM sites WHERE active = 1 AND url LIKE '%chartink%'
     """)
     sites = cursor.fetchall()
     conn.close()
@@ -523,12 +624,9 @@ def scan_now():
     
     for site in sites:
         try:
-            site_id, name, url, selector, is_table, sr_col, stock_name_col, symbol_col, links_col, pct_chg_col, volume_col = site
+            site_id, name, url, selector, active = site
             
-            scraper = RecommendationScraper(
-                site_id, name, url, selector, bool(is_table),
-                sr_col, stock_name_col, symbol_col, links_col, pct_chg_col, volume_col
-            )
+            scraper = ChartInkScraper(site_id, name, url, selector)
             site_new_recommendations = scraper.run()
             
             # Send Telegram notifications for new recommendations
@@ -558,7 +656,7 @@ def create_templates():
 <head>
     <meta charset="UTF-8">
     <meta name="viewport" content="width=device-width, initial-scale=1.0">
-    <title>Stock Data Tracker</title>
+    <title>ChartInk Stock Scanner</title>
     <link href="https://cdn.jsdelivr.net/npm/bootstrap@5.1.3/dist/css/bootstrap.min.css" rel="stylesheet">
     <link href="https://cdn.jsdelivr.net/npm/datatables.net-bs5@1.11.5/css/dataTables.bootstrap5.min.css" rel="stylesheet">
     <style>
@@ -575,7 +673,7 @@ def create_templates():
 </head>
 <body>
     <div class="container">
-        <h1 class="mb-4">Stock Data Tracker</h1>
+        <h1 class="mb-4">ChartInk Stock Scanner</h1>
         
         <ul class="nav nav-tabs mb-4" id="myTab" role="tablist">
             <li class="nav-item" role="presentation">
@@ -599,7 +697,7 @@ def create_templates():
                     <div class="col-md-12">
                         <div class="card mb-4">
                             <div class="card-header d-flex justify-content-between align-items-center">
-                                <h5 class="mb-0">Recent Stock Data</h5>
+                                <h5 class="mb-0">ChartInk Stock Data</h5>
                                 <button id="scanNowBtn" class="btn btn-warning">Scan Now</button>
                             </div>
                             <div class="card-body">
@@ -648,7 +746,7 @@ def create_templates():
                                 </div>
                                 {% else %}
                                 <div class="alert alert-info">
-                                    No stock data found yet. Add sites in the Settings tab and click "Scan Now" to start collecting data.
+                                    No stock data found yet. Click "Scan Now" to start collecting data.
                                 </div>
                                 {% endif %}
                             </div>
@@ -662,15 +760,15 @@ def create_templates():
                 <div class="row">
                     <div class="col-md-12">
                         <div class="card">
+                            <!-- Rest of index.html template -->
                             <div class="card-header">
-                                <h5 class="mb-0">All Stock Data</h5>
+                                <h5 class="mb-0">All Stock Recommendations</h5>
                             </div>
                             <div class="card-body">
                                 <div class="table-responsive">
                                     <table class="table table-hover recommendation-table" id="allRecommendationsTable">
                                         <thead>
                                             <tr>
-                                                <th>Sr.</th>
                                                 <th>Date</th>
                                                 <th>Source</th>
                                                 <th>Symbol</th>
@@ -684,7 +782,6 @@ def create_templates():
                                         <tbody>
                                             {% for rec in recommendations %}
                                             <tr class="{{ rec.recommendation_type.lower() }}">
-                                                <td>{{ rec.sr_num }}</td>
                                                 <td>{{ rec.processed_at }}</td>
                                                 <td>{{ rec.site_name }}</td>
                                                 <td>{{ rec.symbol }}</td>
@@ -715,23 +812,19 @@ def create_templates():
             <!-- Settings Tab -->
             <div class="tab-pane fade" id="settings" role="tabpanel" aria-labelledby="settings-tab">
                 <div class="row">
-                    <div class="col-md-12">
+                    <div class="col-md-6">
                         <div class="card mb-4">
-                            <div class="card-header d-flex justify-content-between align-items-center">
-                                <h5 class="mb-0">Sites to Monitor</h5>
-                                <button class="btn btn-primary" data-bs-toggle="modal" data-bs-target="#addSiteModal">Add Site</button>
+                            <div class="card-header">
+                                <h5 class="mb-0">ChartInk Scanner URLs</h5>
                             </div>
                             <div class="card-body">
-                                {% if sites %}
                                 <div class="table-responsive">
-                                    <table class="table table-striped" id="sitesTable">
+                                    <table class="table table-striped">
                                         <thead>
                                             <tr>
-                                                <th>ID</th>
                                                 <th>Name</th>
                                                 <th>URL</th>
-                                                <th>Selector</th>
-                                                <th>Type</th>
+                                                <th>Last Scan</th>
                                                 <th>Status</th>
                                                 <th>Actions</th>
                                             </tr>
@@ -739,11 +832,9 @@ def create_templates():
                                         <tbody>
                                             {% for site in sites %}
                                             <tr>
-                                                <td>{{ site.id }}</td>
                                                 <td>{{ site.name }}</td>
                                                 <td><a href="{{ site.url }}" target="_blank">{{ site.url }}</a></td>
-                                                <td>{{ site.selector }}</td>
-                                                <td>{{ 'Table' if site.is_table else 'Custom' }}</td>
+                                                <td>{{ site.last_scan or 'Never' }}</td>
                                                 <td>
                                                     <span class="badge {{ 'bg-success' if site.active else 'bg-secondary' }}">
                                                         {{ 'Active' if site.active else 'Inactive' }}
@@ -751,12 +842,12 @@ def create_templates():
                                                 </td>
                                                 <td>
                                                     <form method="post" action="{{ url_for('toggle_site', site_id=site.id) }}" class="d-inline">
-                                                        <button type="submit" class="btn btn-sm {{ 'btn-secondary' if site.active else 'btn-primary' }}">
-                                                            {{ 'Deactivate' if site.active else 'Activate' }}
+                                                        <button type="submit" class="btn btn-sm {{ 'btn-outline-danger' if site.active else 'btn-outline-success' }}">
+                                                            {{ 'Disable' if site.active else 'Enable' }}
                                                         </button>
                                                     </form>
                                                     <form method="post" action="{{ url_for('delete_site', site_id=site.id) }}" class="d-inline">
-                                                        <button type="submit" class="btn btn-sm btn-danger" onclick="return confirm('Are you sure you want to delete this site?')">Delete</button>
+                                                        <button type="submit" class="btn btn-sm btn-danger" onclick="return confirm('Are you sure you want to delete this scanner?')">Delete</button>
                                                     </form>
                                                 </td>
                                             </tr>
@@ -764,11 +855,28 @@ def create_templates():
                                         </tbody>
                                     </table>
                                 </div>
-                                {% else %}
-                                <div class="alert alert-info">
-                                    No sites added yet. Use the "Add Site" button to start.
-                                </div>
-                                {% endif %}
+                            </div>
+                        </div>
+                    </div>
+                    
+                    <div class="col-md-6">
+                        <div class="card">
+                            <div class="card-header">
+                                <h5 class="mb-0">Add ChartInk Scanner</h5>
+                            </div>
+                            <div class="card-body">
+                                <form method="post" action="{{ url_for('add_site') }}">
+                                    <div class="mb-3">
+                                        <label for="name" class="form-label">Scanner Name</label>
+                                        <input type="text" class="form-control" id="name" name="name" required>
+                                    </div>
+                                    <div class="mb-3">
+                                        <label for="url" class="form-label">ChartInk URL</label>
+                                        <input type="url" class="form-control" id="url" name="url" placeholder="https://chartink.com/screener/..." required>
+                                        <div class="form-text">Enter a valid ChartInk screener URL</div>
+                                    </div>
+                                    <button type="submit" class="btn btn-primary">Add Scanner</button>
+                                </form>
                             </div>
                         </div>
                     </div>
@@ -776,82 +884,9 @@ def create_templates():
             </div>
         </div>
     </div>
-
-    <!-- Add Site Modal -->
-    <div class="modal fade" id="addSiteModal" tabindex="-1" aria-labelledby="addSiteModalLabel" aria-hidden="true">
-        <div class="modal-dialog modal-lg">
-            <div class="modal-content">
-                <div class="modal-header">
-                    <h5 class="modal-title" id="addSiteModalLabel">Add Site</h5>
-                    <button type="button" class="btn-close" data-bs-dismiss="modal" aria-label="Close"></button>
-                </div>
-                <div class="modal-body">
-                    <form action="{{ url_for('add_site') }}" method="post">
-                        <div class="mb-3">
-                            <label for="name" class="form-label">Site Name</label>
-                            <input type="text" class="form-control" id="name" name="name" required>
-                        </div>
-                        <div class="mb-3">
-                            <label for="url" class="form-label">URL</label>
-                            <input type="url" class="form-control" id="url" name="url" required>
-                            <small class="text-muted">Enter the full URL including http:// or https://</small>
-                        </div>
-                        <div class="mb-3">
-                            <label for="selector" class="form-label">CSS Selector (optional)</label>
-                            <input type="text" class="form-control" id="selector" name="selector">
-                            <small class="text-muted">CSS selector to find the table, e.g., "table.stock-data"</small>
-                        </div>
-                        
-                        <div class="form-check mb-3">
-                            <input class="form-check-input" type="checkbox" value="1" id="is_table" name="is_table" checked>
-                            <label class="form-check-label" for="is_table">
-                                Content is a table
-                            </label>
-                        </div>
-                        
-                        <div id="tableColumnsSection">
-                            <h6>Table Column Mapping</h6>
-                            <div class="row g-3">
-                                <div class="col-md-2">
-                                    <label for="sr_col" class="form-label">Sr # Col</label>
-                                    <input type="number" class="form-control" id="sr_col" name="sr_col" value="0" min="-1">
-                                </div>
-                                <div class="col-md-2">
-                                    <label for="stock_name_col" class="form-label">Name Col</label>
-                                    <input type="number" class="form-control" id="stock_name_col" name="stock_name_col" value="1" min="-1">
-                                </div>
-                                <div class="col-md-2">
-                                    <label for="symbol_col" class="form-label">Symbol Col</label>
-                                    <input type="number" class="form-control" id="symbol_col" name="symbol_col" value="2" min="-1">
-                                </div>
-                                <div class="col-md-2">
-                                    <label for="links_col" class="form-label">Links Col</label>
-                                    <input type="number" class="form-control" id="links_col" name="links_col" value="-1" min="-1">
-                                </div>
-                                <div class="col-md-2">
-                                    <label for="pct_chg_col" class="form-label">% Change Col</label>
-                                    <input type="number" class="form-control" id="pct_chg_col" name="pct_chg_col" value="3" min="-1">
-                                </div>
-                                <div class="col-md-2">
-                                    <label for="volume_col" class="form-label">Volume Col</label>
-                                    <input type="number" class="form-control" id="volume_col" name="volume_col" value="4" min="-1">
-                                </div>
-                            </div>
-                            <small class="text-muted">Enter column indices (0-based). Use -1 to ignore a column.</small>
-                        </div>
-                        
-                        <div class="mt-4">
-                            <button type="submit" class="btn btn-primary">Add Site</button>
-                            <button type="button" class="btn btn-secondary" data-bs-dismiss="modal">Cancel</button>
-                        </div>
-                    </form>
-                </div>
-            </div>
-        </div>
-    </div>
-
+    
     <script src="https://cdn.jsdelivr.net/npm/bootstrap@5.1.3/dist/js/bootstrap.bundle.min.js"></script>
-    <script src="https://cdn.jsdelivr.net/npm/jquery@3.6.0/dist/jquery.min.js"></script>
+    <script src="https://code.jquery.com/jquery-3.6.0.min.js"></script>
     <script src="https://cdn.jsdelivr.net/npm/datatables.net@1.11.5/js/jquery.dataTables.min.js"></script>
     <script src="https://cdn.jsdelivr.net/npm/datatables.net-bs5@1.11.5/js/dataTables.bootstrap5.min.js"></script>
     <script>
@@ -859,72 +894,55 @@ def create_templates():
             // Initialize DataTables
             $('#recommendationsTable').DataTable({
                 order: [[1, 'desc']],
-                pageLength: 10,
-                responsive: true
+                pageLength: 25
             });
             
             $('#allRecommendationsTable').DataTable({
-                order: [[1, 'desc']],
-                pageLength: 25,
-                responsive: true
-            });
-            
-            $('#sitesTable').DataTable({
-                pageLength: 10,
-                responsive: true
+                order: [[0, 'desc']],
+                pageLength: 50
             });
             
             // Handle scan now button
             $('#scanNowBtn').click(function() {
-                var btn = $(this);
-                var originalText = btn.text();
+                const $btn = $(this);
+                const $status = $('#scanStatus');
                 
-                btn.prop('disabled', true).text('Scanning...');
-                $('#scanStatus').removeClass('d-none alert-success alert-danger').addClass('alert-info').text('Scanning sites...');
+                $btn.prop('disabled', true).html('<span class="spinner-border spinner-border-sm" role="status" aria-hidden="true"></span> Scanning...');
+                $status.removeClass('d-none alert-success alert-danger').addClass('alert-info').html('Scanning ChartInk for stock recommendations...');
                 
                 $.ajax({
-                    url: '{{ url_for("scan_now") }}',
+                    url: '/scan/now',
                     method: 'POST',
                     success: function(response) {
-                        if(response.success) {
-                            $('#scanStatus').removeClass('alert-info alert-danger').addClass('alert-success')
-                                .text('Scan completed successfully! Found ' + response.new_recommendations + ' new stock recommendations.');
+                        if (response.success) {
+                            $status.removeClass('alert-info').addClass('alert-success')
+                                .html(`Scan completed! Found ${response.new_recommendations} new stock recommendations.`);
                             
-                            if(response.new_recommendations > 0) {
-                                setTimeout(function() {
-                                    location.reload();
-                                }, 2000);
-                            }
+                            // Reload page after 2 seconds to show new data
+                            setTimeout(function() {
+                                location.reload();
+                            }, 2000);
                         } else {
-                            $('#scanStatus').removeClass('alert-info alert-success').addClass('alert-danger')
-                                .text('Scan failed: ' + response.error);
+                            $status.removeClass('alert-info').addClass('alert-danger')
+                                .html('Error scanning ChartInk. Please try again.');
                         }
                     },
                     error: function() {
-                        $('#scanStatus').removeClass('alert-info alert-success').addClass('alert-danger')
-                            .text('Error connecting to server');
+                        $status.removeClass('alert-info').addClass('alert-danger')
+                            .html('Error scanning ChartInk. Please try again.');
                     },
                     complete: function() {
-                        btn.prop('disabled', false).text(originalText);
+                        $btn.prop('disabled', false).html('Scan Now');
                     }
                 });
-            });
-            
-            // Toggle table columns section based on is_table checkbox
-            $('#is_table').change(function() {
-                if($(this).is(':checked')) {
-                    $('#tableColumnsSection').show();
-                } else {
-                    $('#tableColumnsSection').hide();
-                }
             });
         });
     </script>
 </body>
 </html>
-            ''')
+''')
     
-    # Create recommendations.html
+    # Create recommendations.html 
     if not os.path.exists('templates/recommendations.html'):
         with open('templates/recommendations.html', 'w') as f:
             f.write('''
@@ -933,7 +951,7 @@ def create_templates():
 <head>
     <meta charset="UTF-8">
     <meta name="viewport" content="width=device-width, initial-scale=1.0">
-    <title>Stock Recommendations</title>
+    <title>Stock Recommendations - ChartInk Scanner</title>
     <link href="https://cdn.jsdelivr.net/npm/bootstrap@5.1.3/dist/css/bootstrap.min.css" rel="stylesheet">
     <link href="https://cdn.jsdelivr.net/npm/datatables.net-bs5@1.11.5/css/dataTables.bootstrap5.min.css" rel="stylesheet">
     <style>
@@ -949,21 +967,21 @@ def create_templates():
 </head>
 <body>
     <div class="container">
-        <div class="d-flex justify-content-between align-items-center mb-4">
-            <h1>Stock Recommendations</h1>
-            <a href="{{ url_for('index') }}" class="btn btn-primary">Back to Dashboard</a>
-        </div>
+        <nav aria-label="breadcrumb">
+            <ol class="breadcrumb">
+                <li class="breadcrumb-item"><a href="{{ url_for('index') }}">Home</a></li>
+                <li class="breadcrumb-item active" aria-current="page">All Recommendations</li>
+            </ol>
+        </nav>
+        
+        <h1 class="mb-4">All Stock Recommendations</h1>
         
         <div class="card">
-            <div class="card-header">
-                <h5 class="mb-0">All Stock Data</h5>
-            </div>
             <div class="card-body">
                 <div class="table-responsive">
-                    <table class="table table-striped recommendation-table" id="allRecommendationsTable">
+                    <table class="table table-hover recommendation-table" id="recommendationsTable">
                         <thead>
                             <tr>
-                                <th>ID</th>
                                 <th>Date</th>
                                 <th>Source</th>
                                 <th>Symbol</th>
@@ -977,7 +995,6 @@ def create_templates():
                         <tbody>
                             {% for rec in recommendations %}
                             <tr class="{{ rec.recommendation_type.lower() }}">
-                                <td>{{ rec.id }}</td>
                                 <td>{{ rec.processed_at }}</td>
                                 <td>{{ rec.site_name }}</td>
                                 <td>{{ rec.symbol }}</td>
@@ -1002,36 +1019,35 @@ def create_templates():
             </div>
         </div>
     </div>
-
+    
     <script src="https://cdn.jsdelivr.net/npm/bootstrap@5.1.3/dist/js/bootstrap.bundle.min.js"></script>
-    <script src="https://cdn.jsdelivr.net/npm/jquery@3.6.0/dist/jquery.min.js"></script>
+    <script src="https://code.jquery.com/jquery-3.6.0.min.js"></script>
     <script src="https://cdn.jsdelivr.net/npm/datatables.net@1.11.5/js/jquery.dataTables.min.js"></script>
     <script src="https://cdn.jsdelivr.net/npm/datatables.net-bs5@1.11.5/js/dataTables.bootstrap5.min.js"></script>
     <script>
         $(document).ready(function() {
-            $('#allRecommendationsTable').DataTable({
-                order: [[1, 'desc']],
-                pageLength: 25,
-                responsive: true
+            // Initialize DataTables
+            $('#recommendationsTable').DataTable({
+                order: [[0, 'desc']],
+                pageLength: 50
             });
         });
     </script>
 </body>
 </html>
-            ''')
+''')
 
-
-# Main startup
-if __name__ == '__main__':
-    # Create HTML templates
+# Now let's add the remaining code to run the application
+if __name__ == "__main__":
+    # Create templates
     create_templates()
     
     # Initialize database
     init_db()
     
-    # Start the background scanner in a separate thread
+    # Start background scanner thread
     scanner_thread = threading.Thread(target=background_scanner, daemon=True)
     scanner_thread.start()
     
-    # Run the Flask app
+    # Run Flask app
     app.run(host='0.0.0.0', port=5000, debug=True)
