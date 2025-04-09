@@ -13,6 +13,8 @@ from flask_sqlalchemy import SQLAlchemy
 import threading
 import json
 import logging
+import re
+import traceback
 
 # Configure logging
 logging.basicConfig(level=logging.INFO, format='%(asctime)s - %(name)s - %(levelname)s - %(message)s')
@@ -574,426 +576,609 @@ def send_telegram_message(message):
         return False
     
     try:
-        bot.send_message(chat_id='@Stockniftybot', text=message, parse_mode='HTML')
+        bot.send_message(chat_id=TELEGRAM_CHAT_ID, text=message, parse_mode='HTML')
+        logger.info(f"Sent Telegram message successfully: {message[:50]}...")
         return True
     except TelegramError as e:
         logger.error(f"Failed to send Telegram message: {e}")
         return False
 
 def parse_chartink_table(url):
-    """Parse table data from ChartInk URL"""
+    """Parse table data from ChartInk URL with improved handling"""
     try:
         headers = {
-            'User-Agent': 'Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/91.0.4472.124 Safari/537.36'
+            'User-Agent': 'Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/91.0.4472.124 Safari/537.36',
+            'Accept': 'application/json, text/javascript, */*; q=0.01',
+            'Accept-Language': 'en-US,en;q=0.9',
+            'X-Requested-With': 'XMLHttpRequest',
+            'Referer': url
         }
+        
+        logger.info(f"Fetching data from ChartInk URL: {url}")
+        
+        # Extract the scan code from the URL
+        scan_code = url.split('/')[-1]
+        
+        # First attempt: Direct HTML parsing
         response = requests.get(url, headers=headers)
         response.raise_for_status()
         
         soup = BeautifulSoup(response.text, 'html.parser')
+        
+        # Look for the table - ChartInk might use different table structures
         table = soup.find('table', class_='table table-striped table-bordered table-hover')
         
         if not table:
-            return None
+            # Try to find any table with class containing 'table'
+            table = soup.find('table', class_=lambda c: c and 'table' in c)
         
-        # Extract table headers
-        headers = []
-        for th in table.find('thead').find_all('th'):
-            headers.append(th.text.strip())
+        if table:
+            logger.info("Found HTML table, parsing data...")
+            # Extract table headers
+            headers = []
+            thead = table.find('thead')
+            if thead:
+                for th in thead.find_all('th'):
+                    headers.append(th.text.strip())
+            else:
+                # If no thead, try to get headers from first row
+                first_row = table.find('tr')
+                if first_row:
+                    for th in first_row.find_all(['th', 'td']):
+                        headers.append(th.text.strip())
+            
+            # Extract table rows
+            rows = []
+            tbody = table.find('tbody')
+            if tbody:
+                for tr in tbody.find_all('tr'):
+                    row = []
+                    for td in tr.find_all('td'):
+                        row.append(td.text.strip())
+                    if row:  # Only add non-empty rows
+                        rows.append(row)
+            else:
+                # If no tbody, get rows directly (skip header row if headers were found)
+                skip_first = len(headers) > 0
+                for tr in table.find_all('tr')[1:] if skip_first else table.find_all('tr'):
+                    row = []
+                    for td in tr.find_all('td'):
+                        row.append(td.text.strip())
+                    if row:  # Only add non-empty rows
+                        rows.append(row)
+            
+            # Create DataFrame
+            if headers and rows and len(headers) == len(rows[0]):
+                df = pd.DataFrame(rows, columns=headers)
+                logger.info(f"Successfully parsed {len(df)} rows from HTML table")
+                return df
         
-        # Extract table rows
-        rows = []
-        for tr in table.find('tbody').find_all('tr'):
-            row = []
-            for td in tr.find_all('td'):
-                row.append(td.text.strip())
-            rows.append(row)
+        # Second attempt: Try API approach to get JSON data
+        logger.info("HTML table parsing failed, trying API approach...")
         
-        # Create DataFrame
-        df = pd.DataFrame(rows, columns=headers)
-        return df
+        # ChartInk might have an API endpoint for screener data
+        api_url = "https://chartink.com/screener/process"
+        
+        # Try to extract scan_clause from the page
+        script_tags = soup.find_all('script')
+        scan_clause = None
+        
+        for script in script_tags:
+            if script.string and 'scan_clause' in script.string:
+                # Extract the scan clause using regex
+                match = re.search(r'scan_clause\s*:\s*[\'"](.+?)[\'"]', script.string)
+                if match:
+                    scan_clause = match.group(1)
+                    break
+        
+        if scan_clause:
+            payload = {
+                'scan_clause': scan_clause,
+                'screener_id': scan_code
+            }
+            
+            # Make API request
+            api_response = requests.post(api_url, data=payload, headers=headers)
+            api_response.raise_for_status()
+            
+            # Parse JSON response
+            data = api_response.json()
+            
+            if 'data' in data:
+                stock_data = data['data']
+                if stock_data:
+                    # Convert to DataFrame
+                    df = pd.DataFrame(stock_data)
+                    logger.info(f"Successfully parsed {len(df)} rows from API response")
+                    return df
+                else:
+                    logger.info("API returned empty data set")
+                    return pd.DataFrame()  # Return empty DataFrame
+        
+        # Third attempt: Try the newer format in some ChartInk screeners
+        try:
+            # Look for data in the page's JSON script tags
+            for script in soup.find_all('script'):
+                if script.string and 'var scanData' in script.string:
+                    # Extract JSON data using regex
+                    match = re.search(r'var\s+scanData\s*=\s*(\[.+?\]);', script.string, re.DOTALL)
+                    if match:
+                        json_data = match.group(1)
+                        # Parse the JSON
+                        stock_data = json.loads(json_data)
+                        if stock_data:
+                            df = pd.DataFrame(stock_data)
+                            logger.info(f"Successfully parsed {len(df)} rows from embedded JSON")
+                            return df
+        except Exception as json_error:
+            logger.error(f"Error parsing embedded JSON: {json_error}")
+        
+       # If we reach here, all methods failed
+        logger.warning(f"Failed to parse data from {url}. Could not find table or API data.")
+        return pd.DataFrame()  # Return empty DataFrame
+        
     except Exception as e:
-        logger.error(f"Error parsing ChartInk URL {url}: {e}")
-        return None
+        logger.error(f"Error fetching or parsing ChartInk data: {e}")
+        logger.error(traceback.format_exc())
+        return pd.DataFrame()  # Return empty DataFrame
 
-def scan_all_chartink_urls():
-    """Scan all active ChartInk URLs and save results"""
+def scan_chartink_urls():
+    """Scan all active ChartInk URLs and store results"""
+    logger.info("Starting ChartInk scan...")
+    
+    # Get all active URLs
+    active_urls = ChartinkURL.query.filter_by(active=True).all()
+    
+    if not active_urls:
+        logger.info("No active URLs to scan")
+        return
+    
+    scan_count = 0
+    total_stocks = 0
+    message_parts = ["📊 <b>ChartInk Scan Results</b>\n"]
     ist = pytz.timezone('Asia/Kolkata')
     now = datetime.datetime.now(ist)
     
-    with app.app_context():
-        active_urls = ChartinkURL.query.filter_by(active=True).all()
-        
-        if not active_urls:
-            logger.info("No active ChartInk URLs to scan")
-            return
-        
-        message_parts = [f"<b>ChartInk Scan Results - {now.strftime('%d-%b-%Y %H:%M:%S')}</b>\n"]
-        
-        for url_obj in active_urls:
-            logger.info(f"Scanning URL: {url_obj.url}")
-            df = parse_chartink_table(url_obj.url)
+    for url in active_urls:
+        try:
+            logger.info(f"Scanning URL: {url.name} ({url.url})")
+            df = parse_chartink_table(url.url)
             
-            if df is not None:
-                # Save scan result to database
-                scan_result = ScanResult(
-                    url_id=url_obj.id,
+            if df.empty:
+                message_parts.append(f"⚠️ <b>{url.name}</b>: No stocks found")
+                logger.info(f"No stocks found for {url.name}")
+                # Store empty result
+                result = ScanResult(
+                    url_id=url.id,
                     scan_time=now,
-                    data=df.to_json(orient='records')
+                    data=json.dumps([])
                 )
-                db.session.add(scan_result)
+                db.session.add(result)
+                continue
+            
+            # Convert DataFrame to JSON-compatible format
+            records = df.to_dict('records')
+            
+            # Clean up the data to ensure JSON serialization
+            for record in records:
+                for key, value in record.items():
+                    if pd.isna(value):
+                        record[key] = ""
+                    elif isinstance(value, (float, int)):
+                        # Format numbers to avoid floating point precision issues
+                        record[key] = float(f"{value:.2f}") if isinstance(value, float) else value
+            
+            # Store in database
+            result = ScanResult(
+                url_id=url.id,
+                scan_time=now,
+                data=json.dumps(records)
+            )
+            db.session.add(result)
+            
+            # Prepare Telegram message
+            stock_count = len(records)
+            total_stocks += stock_count
+            scan_count += 1
+            
+            message_parts.append(f"✅ <b>{url.name}</b>: {stock_count} stocks")
+            
+            # Add top 5 stocks to message
+            if stock_count > 0:
+                message_parts.append("<i>Top stocks:</i>")
+                for i, record in enumerate(records[:5]):
+                    stock_name = record.get('nsecode', record.get('name', 'Unknown'))
+                    message_parts.append(f"  {i+1}. {stock_name}")
                 
-                # Add to Telegram message
-                message_parts.append(f"\n<b>{url_obj.name}</b>")
-                if len(df) > 0:
-                    stocks = ", ".join(df['nsecode'].tolist()[:10]) if 'nsecode' in df.columns else "Data available"
-                    if len(df) > 10:
-                        stocks += f" and {len(df) - 10} more"
-                    message_parts.append(stocks)
-                else:
-                    message_parts.append("No stocks matched criteria")
-            else:
-                message_parts.append(f"\n<b>{url_obj.name}</b>: Error fetching data")
-        
+                if stock_count > 5:
+                    message_parts.append(f"  ...and {stock_count - 5} more")
+                
+                message_parts.append("")  # Empty line for spacing
+            
+        except Exception as e:
+            logger.error(f"Error scanning URL {url.name}: {e}")
+            message_parts.append(f"❌ <b>{url.name}</b>: Error - {str(e)[:100]}")
+    
+    # Commit changes to database
+    try:
         db.session.commit()
+        logger.info("Scan results saved to database")
+    except Exception as e:
+        db.session.rollback()
+        logger.error(f"Failed to save scan results: {e}")
+    
+    # Send Telegram notification
+    if scan_count > 0:
+        message_parts.append(f"\n📈 <b>Total:</b> {total_stocks} stocks across {scan_count} scanners")
+        message_parts.append(f"🕒 <b>Scan time:</b> {now.strftime('%d-%b-%Y %H:%M:%S')} IST")
         
-        # Send Telegram message
         message = "\n".join(message_parts)
         send_telegram_message(message)
-        
-        logger.info("Scan completed")
 
-def daily_analysis():
-    """Perform daily analysis after market hours and store the daily report"""
-    ist = pytz.timezone('Asia/Kolkata')
-    now = datetime.datetime.now(ist)
-    today = now.date()
+def generate_daily_analysis():
+    """Generate daily analysis from today's scan results"""
+    logger.info("Generating daily analysis...")
     
-    with app.app_context():
-        active_urls = ChartinkURL.query.filter_by(active=True).all()
+    ist = pytz.timezone('Asia/Kolkata')
+    today = datetime.datetime.now(ist).date()
+    
+    # Check if analysis already exists for today
+    existing = DailyAnalysis.query.filter_by(analysis_date=today).first()
+    if existing:
+        logger.info(f"Daily analysis for {today} already exists. Updating...")
+    
+    # Get all active URLs
+    urls = ChartinkURL.query.all()
+    
+    # Initialize report data
+    report_data = {}
+    
+    for url in urls:
+        # Get the latest scan result for this URL from today
+        latest_scan = ScanResult.query.filter(
+            ScanResult.url_id == url.id,
+            ScanResult.scan_time >= datetime.datetime.combine(today, datetime.time.min),
+            ScanResult.scan_time <= datetime.datetime.combine(today, datetime.time.max)
+        ).order_by(ScanResult.scan_time.desc()).first()
         
-        if not active_urls:
-            logger.info("No active ChartInk URLs for daily analysis")
-            return
+        if latest_scan:
+            report_data[url.name] = json.loads(latest_scan.data)
+    
+    # Store in database
+    if report_data:
+        if existing:
+            existing.data = json.dumps(report_data)
+            existing.created_at = datetime.datetime.utcnow()
+        else:
+            analysis = DailyAnalysis(
+                analysis_date=today,
+                data=json.dumps(report_data)
+            )
+            db.session.add(analysis)
         
-        message_parts = [f"<b>ChartInk Daily Analysis - {now.strftime('%d-%b-%Y')}</b>\n"]
-        
-        # Create daily report data
-        daily_report = {}
-        
-        for url_obj in active_urls:
-            # Get the latest scan result
-            latest_scan = ScanResult.query.filter_by(url_id=url_obj.id).order_by(ScanResult.scan_time.desc()).first()
+        try:
+            db.session.commit()
+            logger.info(f"Daily analysis for {today} saved to database")
             
-            if latest_scan:
-                df = pd.read_json(latest_scan.data)
-                
-                # Add to daily report
-                daily_report[url_obj.name] = json.loads(df.to_json(orient='records'))
-                
-                # Add to Telegram message
-                message_parts.append(f"\n<b>{url_obj.name}</b>")
-                if len(df) > 0:
-                    stocks = ", ".join(df['nsecode'].tolist()[:15]) if 'nsecode' in df.columns else "Data available"
-                    if len(df) > 15:
-                        stocks += f" and {len(df) - 15} more"
-                    message_parts.append(stocks)
-                else:
-                    message_parts.append("No stocks matched criteria")
-            else:
-                message_parts.append(f"\n<b>{url_obj.name}</b>: No data available")
-                daily_report[url_obj.name] = []
-        
-        # Save daily report to database
-        daily_analysis_entry = DailyAnalysis(
-            analysis_date=today,
-            data=json.dumps(daily_report)
-        )
-        db.session.add(daily_analysis_entry)
-        db.session.commit()
-        
-        message_parts.append("\nNext scan will be performed at 9:15 AM on the next trading day.")
+            # Send Telegram notification
+            message = f"📊 <b>Daily Analysis Report Generated</b>\n\n"
+            message += f"📅 <b>Date:</b> {today.strftime('%d-%b-%Y')}\n"
+            message += f"🔍 <b>Screeners included:</b> {len(report_data)}\n\n"
+            
+            # Add summary of stocks found in each screener
+            for name, stocks in report_data.items():
+                message += f"• <b>{name}</b>: {len(stocks)} stocks\n"
+            
+            send_telegram_message(message)
+            
+        except Exception as e:
+            db.session.rollback()
+            logger.error(f"Failed to save daily analysis: {e}")
+    else:
+        logger.info("No scan data available for today to generate analysis")
 
-# Add this before line 717
-message_parts = []
-# Add your message parts here
-message_parts.append("First message part")
-message_parts.append("Second message part")
-# etc.
+def schedule_jobs():
+    """Schedule recurring jobs"""
+    # Clear existing jobs
+    schedule.clear()
+    
+    # Schedule scans during market hours
+    schedule.every(10).minutes.do(scan_chartink_urls)
+    
+    # Schedule daily analysis at 3:45 PM IST (after market close)
+    ist = pytz.timezone('Asia/Kolkata')
+    schedule.every().day.at("15:45").do(generate_daily_analysis)
+    
+    logger.info("Jobs scheduled")
 
-# Then join them
-message = "\n".join(message_parts)       
-       # Send Telegram message
-message = "\n".join(message_parts)
-send_telegram_message(message)
-
-logger.info("Daily analysis completed successfully")
+def run_scheduler():
+    """Run the scheduler in a separate thread"""
+    while True:
+        schedule.run_pending()
+        time.sleep(1)
 
 # Flask routes
 @app.route('/')
 def index():
-    """Home page route"""
-    ist = pytz.timezone('Asia/Kolkata')
-    now = datetime.datetime.now(ist)
-    
+    """Main dashboard page"""
     urls = ChartinkURL.query.all()
     active_count = ChartinkURL.query.filter_by(active=True).count()
     
-    # Get latest scan results
+    # Get the latest scan result for each URL
     scan_results = {}
     total_stocks = 0
-    last_scan_time = "Not available"
+    common_stocks = {}
     
     for url in urls:
         latest_scan = ScanResult.query.filter_by(url_id=url.id).order_by(ScanResult.scan_time.desc()).first()
         if latest_scan:
             data = json.loads(latest_scan.data)
-            total_stocks += len(data)
-            scan_time = latest_scan.scan_time.astimezone(ist).strftime('%d-%b-%Y %H:%M:%S')
-            scan_results[url.id] = {'data': data, 'time': scan_time}
+            ist = pytz.timezone('Asia/Kolkata')
+            scan_time = latest_scan.scan_time.replace(tzinfo=pytz.UTC).astimezone(ist)
             
-            # Update last scan time
-            if last_scan_time == "Not available" or latest_scan.scan_time > datetime.datetime.strptime(last_scan_time, '%d-%b-%Y %H:%M:%S'):
-                last_scan_time = scan_time
+            scan_results[url.id] = {
+                'time': scan_time.strftime('%d-%b-%Y %H:%M:%S'),
+                'data': data
+            }
+            
+            # Count total stocks
+            total_stocks += len(data)
+            
+            # Track common stocks across screeners
+            for stock in data:
+                stock_name = stock.get('nsecode', stock.get('name', 'Unknown'))
+                if stock_name not in common_stocks:
+                    common_stocks[stock_name] = {'count': 0, 'screeners': []}
+                
+                common_stocks[stock_name]['count'] += 1
+                common_stocks[stock_name]['screeners'].append(url.name)
     
-    # Find common stocks across screeners
-    common_stocks = {}
-    stock_appearances = {}
-    
-    for url_id, result in scan_results.items():
-        url = next((u for u in urls if u.id == url_id), None)
-        if url and url.active:
-            for stock_data in result['data']:
-                if 'nsecode' in stock_data:
-                    stock_name = stock_data['nsecode']
-                    if stock_name not in stock_appearances:
-                        stock_appearances[stock_name] = {'count': 0, 'screeners': []}
-                    
-                    stock_appearances[stock_name]['count'] += 1
-                    stock_appearances[stock_name]['screeners'].append(url.name)
-    
-    # Filter for stocks appearing in multiple screeners
-    for stock, details in stock_appearances.items():
-        if details['count'] > 1:
-            common_stocks[stock] = details
-    
-    # Sort common stocks by appearance count (descending)
+    # Filter for stocks in multiple screeners
+    common_stocks = {k: v for k, v in common_stocks.items() if v['count'] > 1}
+    # Sort by frequency (most common first)
     common_stocks = dict(sorted(common_stocks.items(), key=lambda x: x[1]['count'], reverse=True))
+    
+    # Get the last scan time
+    last_scan_time = "No scans yet"
+    latest_scan = ScanResult.query.order_by(ScanResult.scan_time.desc()).first()
+    if latest_scan:
+        ist = pytz.timezone('Asia/Kolkata')
+        scan_time = latest_scan.scan_time.replace(tzinfo=pytz.UTC).astimezone(ist)
+        last_scan_time = scan_time.strftime('%d-%b-%Y %H:%M:%S')
+    
+    # Current time in IST
+    ist = pytz.timezone('Asia/Kolkata')
+    current_time = datetime.datetime.now(ist).strftime('%d-%b-%Y %H:%M:%S')
     
     return render_template(
         'index.html', 
         urls=urls, 
-        scan_results=scan_results,
         active_count=active_count,
+        scan_results=scan_results,
         total_stocks=total_stocks,
-        last_scan_time=last_scan_time,
         common_stocks=common_stocks,
-        current_time=now.strftime('%d-%b-%Y %H:%M:%S'),
+        last_scan_time=last_scan_time,
+        current_time=current_time,
         is_market_hours=is_market_hours()
     )
 
-@app.route('/manage_urls')
+@app.route('/manage')
 def manage_urls():
-    """Manage URLs page route"""
-    ist = pytz.timezone('Asia/Kolkata')
-    now = datetime.datetime.now(ist)
-    
+    """Manage ChartInk URLs"""
     urls = ChartinkURL.query.all()
+    
+    # Current time in IST
+    ist = pytz.timezone('Asia/Kolkata')
+    current_time = datetime.datetime.now(ist).strftime('%d-%b-%Y %H:%M:%S')
     
     return render_template(
         'manage_urls.html', 
         urls=urls,
-        current_time=now.strftime('%d-%b-%Y %H:%M:%S'),
+        current_time=current_time,
         is_market_hours=is_market_hours()
     )
 
-@app.route('/add_url', methods=['POST'])
+@app.route('/add', methods=['POST'])
 def add_url():
     """Add a new ChartInk URL"""
-    url = request.form.get('url', '').strip()
-    name = request.form.get('name', '').strip()
+    url = request.form.get('url')
+    name = request.form.get('name')
     
     if not url or not name:
         flash('URL and name are required', 'danger')
         return redirect(url_for('manage_urls'))
     
-    # Check if URL is already in the database
-    existing_url = ChartinkURL.query.filter_by(url=url).first()
-    if existing_url:
-        flash('This URL already exists in the database', 'warning')
+    # Check if URL is valid
+    if not url.startswith('https://chartink.com/'):
+        flash('Please enter a valid ChartInk URL', 'danger')
         return redirect(url_for('manage_urls'))
     
-    # Test if the URL is valid
-    try:
-        df = parse_chartink_table(url)
-        if df is None:
-            flash('Could not parse data from this URL. Please check if it is a valid ChartInk screener URL', 'danger')
-            return redirect(url_for('manage_urls'))
-    except Exception as e:
-        flash(f'Error accessing URL: {str(e)}', 'danger')
+    # Check if URL already exists
+    existing = ChartinkURL.query.filter_by(url=url).first()
+    if existing:
+        flash('This URL is already in the system', 'warning')
         return redirect(url_for('manage_urls'))
     
     # Add URL to database
-    new_url = ChartinkURL(url=url, name=name, active=True)
+    new_url = ChartinkURL(url=url, name=name)
     db.session.add(new_url)
-    db.session.commit()
     
-    flash(f'Added ChartInk URL: {name}', 'success')
+    try:
+        db.session.commit()
+        flash(f'Added "{name}" successfully', 'success')
+        
+        # Try to scan it immediately
+        try:
+            df = parse_chartink_table(url)
+            if not df.empty:
+                records = df.to_dict('records')
+                
+                # Clean up the data to ensure JSON serialization
+                for record in records:
+                    for key, value in record.items():
+                        if pd.isna(value):
+                            record[key] = ""
+                        elif isinstance(value, (float, int)):
+                            record[key] = float(f"{value:.2f}") if isinstance(value, float) else value
+                
+                ist = pytz.timezone('Asia/Kolkata')
+                now = datetime.datetime.now(ist)
+                
+                result = ScanResult(
+                    url_id=new_url.id,
+                    scan_time=now,
+                    data=json.dumps(records)
+                )
+                db.session.add(result)
+                db.session.commit()
+                flash(f'Initial scan completed with {len(records)} stocks', 'info')
+        except Exception as e:
+            logger.error(f"Error during initial scan: {e}")
+    except Exception as e:
+        db.session.rollback()
+        flash(f'Error adding URL: {str(e)}', 'danger')
+    
     return redirect(url_for('manage_urls'))
 
-@app.route('/toggle_url/<int:url_id>')
+@app.route('/toggle/<int:url_id>')
 def toggle_url(url_id):
-    """Toggle URL active status"""
+    """Toggle a URL's active status"""
     url = ChartinkURL.query.get_or_404(url_id)
     url.active = not url.active
-    db.session.commit()
     
-    flash(f'{"Activated" if url.active else "Deactivated"} URL: {url.name}', 'success')
+    try:
+        db.session.commit()
+        status = 'activated' if url.active else 'deactivated'
+        flash(f'"{url.name}" {status} successfully', 'success')
+    except Exception as e:
+        db.session.rollback()
+        flash(f'Error toggling URL: {str(e)}', 'danger')
+    
     return redirect(url_for('manage_urls'))
 
-@app.route('/delete_url/<int:url_id>')
+@app.route('/delete/<int:url_id>')
 def delete_url(url_id):
     """Delete a URL"""
     url = ChartinkURL.query.get_or_404(url_id)
+    name = url.name
     
-    # Delete associated scan results first
-    ScanResult.query.filter_by(url_id=url_id).delete()
+    try:
+        # Delete associated scan results first
+        ScanResult.query.filter_by(url_id=url_id).delete()
+        
+        # Then delete the URL
+        db.session.delete(url)
+        db.session.commit()
+        flash(f'"{name}" deleted successfully', 'success')
+    except Exception as e:
+        db.session.rollback()
+        flash(f'Error deleting URL: {str(e)}', 'danger')
     
-    # Delete URL
-    db.session.delete(url)
-    db.session.commit()
-    
-    flash(f'Deleted URL: {url.name}', 'success')
     return redirect(url_for('manage_urls'))
 
-@app.route('/force_scan')
+@app.route('/scan')
 def force_scan():
-    """Force a scan of all active URLs"""
+    """Force an immediate scan"""
     try:
-        scan_all_chartink_urls()
-        flash('Forced scan completed successfully', 'success')
+        scan_chartink_urls()
+        flash('Scan completed successfully', 'success')
     except Exception as e:
-        flash(f'Error during forced scan: {str(e)}', 'danger')
+        flash(f'Error during scan: {str(e)}', 'danger')
     
     return redirect(url_for('index'))
 
-@app.route('/daily_report')
+@app.route('/daily')
 def daily_report():
-    """Show daily report page"""
+    """View daily analysis reports"""
+    # Get selected date or default to today
+    date_str = request.args.get('date')
+    
     ist = pytz.timezone('Asia/Kolkata')
-    now = datetime.datetime.now(ist)
-    today = now.date().strftime('%Y-%m-%d')
+    today = datetime.datetime.now(ist).date()
     
-    # Get selected date (default to today)
-    selected_date = request.args.get('date', today)
+    if date_str:
+        try:
+            selected_date = datetime.datetime.strptime(date_str, '%Y-%m-%d').date()
+        except ValueError:
+            selected_date = today
+    else:
+        selected_date = today
     
-    try:
-        date_obj = datetime.datetime.strptime(selected_date, '%Y-%m-%d').date()
-        formatted_date = date_obj.strftime('%d %b %Y')
-    except ValueError:
-        flash('Invalid date format', 'danger')
-        return redirect(url_for('daily_report'))
+    # Format date for display
+    formatted_date = selected_date.strftime('%d-%b-%Y')
     
-    # Get daily report for selected date
-    report = DailyAnalysis.query.filter_by(analysis_date=date_obj).first()
+    # Get available report dates
+    available_dates = [report.analysis_date for report in DailyAnalysis.query.order_by(DailyAnalysis.analysis_date.desc()).all()]
+    
+    # Get report data for selected date
+    report = DailyAnalysis.query.filter_by(analysis_date=selected_date).first()
     report_data = json.loads(report.data) if report else None
     
-    # Get all available dates
-    available_reports = DailyAnalysis.query.order_by(DailyAnalysis.analysis_date.desc()).all()
-    available_dates = [report.analysis_date for report in available_reports]
+    # Current time in IST
+    current_time = datetime.datetime.now(ist).strftime('%d-%b-%Y %H:%M:%S')
     
     return render_template(
         'daily_report.html',
         report_data=report_data,
-        selected_date=selected_date,
+        selected_date=date_str or today.strftime('%Y-%m-%d'),
         formatted_date=formatted_date,
-        today=today,
         available_dates=available_dates,
-        current_time=now.strftime('%d-%b-%Y %H:%M:%S'),
+        today=today.strftime('%Y-%m-%d'),
+        current_time=current_time,
         is_market_hours=is_market_hours()
     )
 
-@app.route('/api/scan_results')
-def api_scan_results():
-    """API endpoint to get latest scan results"""
-    try:
-        urls = ChartinkURL.query.filter_by(active=True).all()
-        results = {}
-        
-        for url in urls:
-            latest_scan = ScanResult.query.filter_by(url_id=url.id).order_by(ScanResult.scan_time.desc()).first()
-            if latest_scan:
-                results[url.name] = {
-                    'scan_time': latest_scan.scan_time.isoformat(),
-                    'data': json.loads(latest_scan.data)
-                }
-        
-        return jsonify({
-            'status': 'success',
-            'results': results
-        })
-    except Exception as e:
-        return jsonify({
-            'status': 'error',
-            'message': str(e)
-        }), 500
+@app.route('/api/results', methods=['GET'])
+def api_results():
+    """API endpoint for latest scan results"""
+    urls = ChartinkURL.query.all()
+    results = {}
+    
+    for url in urls:
+        latest_scan = ScanResult.query.filter_by(url_id=url.id).order_by(ScanResult.scan_time.desc()).first()
+        if latest_scan:
+            data = json.loads(latest_scan.data)
+            ist = pytz.timezone('Asia/Kolkata')
+            scan_time = latest_scan.scan_time.replace(tzinfo=pytz.UTC).astimezone(ist)
+            results[url.name] = {
+                'time': scan_time.strftime('%d-%b-%Y %H:%M:%S'),
+                'data': data
+            }
+    
+    return jsonify(results)
 
-# Scheduler functions
-def schedule_scans():
-    """Set up scheduler for scans"""
-    # Scan during market hours (9:15 AM to 3:30 PM, every 10 minutes)
-    schedule.every().monday.at("09:15").do(scan_all_chartink_urls)
-    schedule.every().tuesday.at("09:15").do(scan_all_chartink_urls)
-    schedule.every().wednesday.at("09:15").do(scan_all_chartink_urls)
-    schedule.every().thursday.at("09:15").do(scan_all_chartink_urls)
-    schedule.every().friday.at("09:15").do(scan_all_chartink_urls)
+@app.errorhandler(404)
+def page_not_found(e):
+    return render_template('404.html'), 404
+
+# Initialize application
+def init_app():
+    """Initialize the application"""
+    # Create templates directory and files
+    create_templates()
     
-    schedule.every(10).minutes.do(lambda: scan_all_chartink_urls() if is_market_hours() else None)
+    # Create database tables
+    with app.app_context():
+        db.create_all()
     
-    # Daily analysis after market hours
-    schedule.every().monday.at("15:40").do(daily_analysis)
-    schedule.every().tuesday.at("15:40").do(daily_analysis)
-    schedule.every().wednesday.at("15:40").do(daily_analysis)
-    schedule.every().thursday.at("15:40").do(daily_analysis)
-    schedule.every().friday.at("15:40").do(daily_analysis)
+    # Schedule jobs
+    schedule_jobs()
     
-    # Create a separate thread for the scheduler
-    def run_scheduler():
-        while True:
-            schedule.run_pending()
-            time.sleep(1)
-    
+    # Start scheduler in a separate thread
     scheduler_thread = threading.Thread(target=run_scheduler)
     scheduler_thread.daemon = True
     scheduler_thread.start()
+    
+    logger.info("Application initialized")
 
-def init_db():
-    """Initialize database and create tables"""
-    with app.app_context():
-        db.create_all()
-        logger.info("Database initialized")
-
-# Main function
-def main():
-    """Main function to start the application"""
-    # Create templates if they don't exist
-    create_templates()
+if __name__ == '__main__':
+    init_app()
     
-    # Initialize database
-    init_db()
-    
-    # Set up scheduler
-    schedule_scans()
-    
-    # Run initial scan if during market hours
+    # Initial scan if during market hours
     if is_market_hours():
         with app.app_context():
-            scan_all_chartink_urls()
+            scan_chartink_urls()
     
-    # Start Flask server
+    # Run the Flask app
     port = int(os.environ.get('PORT', 5000))
-    logger.info(f"Starting ChartInk Stock Scanner on port {port}")
     app.run(host='0.0.0.0', port=port, debug=False)
-
-if __name__ == "__main__":
-    main()
-                    
