@@ -760,7 +760,7 @@ def create_templates():
                 <div class="row">
                     <div class="col-md-12">
                         <div class="card">
-                            <!-- Rest of index.html template -->
+                           <!-- Rest of index.html template -->
                             <div class="card-header">
                                 <h5 class="mb-0">All Stock Recommendations</h5>
                             </div>
