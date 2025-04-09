@@ -5,28 +5,17 @@
     <meta name="viewport" content="width=device-width, initial-scale=1.0">
     <title>Nifty 50 Stock Recommendations</title>
     <style>
-        body { font-family: sans-serif; line-height: 1.6; padding: 20px; background-color: #f4f4f4; color: #333; }
-        h1, h2, h3 { color: #0056b3; border-bottom: 2px solid #0056b3; padding-bottom: 5px; }
-        .container { background-color: #fff; padding: 20px; border-radius: 8px; box-shadow: 0 2px 5px rgba(0,0,0,0.1); margin-bottom: 20px; }
-        table { width: 100%; border-collapse: collapse; margin-top: 15px; }
-        th, td { border: 1px solid #ddd; padding: 10px; text-align: left; }
-        th { background-color: #e9ecef; }
-        .buy { color: green; font-weight: bold; }
-        .sell { color: red; font-weight: bold; }
-        .hold { color: orange; }
-        .signal-cell { text-align: center; }
-        .portfolio-summary strong { display: inline-block; min-width: 150px; }
-        .error { color: red; border: 1px solid red; padding: 10px; background-color: #ffebeb; border-radius: 5px; }
-        .info { color: blue; border: 1px solid blue; padding: 10px; background-color: #e7f3ff; border-radius: 5px; }
-        .timestamp { font-size: 0.9em; color: #666; text-align: right; margin-top: 20px;}
-        .trade-log { max-height: 150px; overflow-y: auto; border: 1px solid #ccc; padding: 5px; margin-top: 10px; font-size: 0.9em; background: #eee;}
-        .trade-log p { margin: 2px 0; }
+        /* ... (keep existing styles) ... */
+        .positive { color: green; }
+        .negative { color: red; }
+        .neutral { color: #555; } /* Style for 0% change */
+        td, th { vertical-align: middle; } /* Align cell content vertically */
     </style>
 </head>
 <body>
 
     <h1>Nifty 50 Stock Analysis</h1>
-    <p>Automated recommendations based on technical indicators (SMA, RSI, MACD, Bollinger Bands). Data fetched from Yahoo Finance.</p>
+    <p>Automated analysis based on technical indicators. Data fetched from Yahoo Finance.</p>
     <p><strong>Disclaimer:</strong> This is for informational and educational purposes only. Not financial advice.</p>
 
     {% if error %}
@@ -36,40 +25,38 @@
         </div>
     {% endif %}
 
-    <!-- Recommendations Section -->
+    <!-- Stock Data Table Section -->
     <div class="container">
-        <h2>Today's Signals (Based on previous day's close)</h2>
-        {% if recommendations %}
+        <h2>Stock Data & Signals (Based on previous day's close)</h2>
+        {% if all_stock_data %}
             <table>
                 <thead>
                     <tr>
                         <th>Symbol</th>
+                        <th>CMP</th> <!-- Current Market Price -->
+                        <th>% Change</th> <!-- Percentage Change -->
                         <th>Signal</th>
-                        <th>Price</th>
                         <th>Target</th>
-                        <th>Stop Loss</th>
-                        <th>Reason</th>
-                        <th>Date</th>
                     </tr>
                 </thead>
                 <tbody>
-                    {% for rec in recommendations %}
+                    {% for stock in all_stock_data %}
                     <tr>
-                        <td>{{ rec.symbol }}</td>
-                        <td class="signal-cell {% if rec.signal == 'BUY' %}buy{% elif rec.signal == 'SELL' %}sell{% else %}hold{% endif %}">
-                            {{ rec.signal }}
+                        <td>{{ stock.symbol }}</td>
+                        <td>{{ "%.2f"|format(stock.cmp) if stock.cmp is not none else 'N/A' }}</td>
+                        <td class="{% if stock.percent_change > 0 %}positive{% elif stock.percent_change < 0 %}negative{% else %}neutral{% endif %}">
+                            {{ "%.2f%%"|format(stock.percent_change) if stock.percent_change is not none else 'N/A' }}
                         </td>
-                        <td>{{ "%.2f"|format(rec.price) }}</td>
-                        <td>{{ "%.2f"|format(rec.target) if rec.target else 'N/A' }}</td>
-                        <td>{{ "%.2f"|format(rec.stop_loss) if rec.stop_loss else 'N/A' }}</td>
-                        <td>{{ rec.reason }}</td>
-                        <td>{{ rec.timestamp }}</td>
+                        <td class="signal-cell {% if stock.signal == 'BUY' %}buy{% elif stock.signal == 'SELL' %}sell{% else %}hold{% endif %}">
+                            {{ stock.signal }}
+                        </td>
+                        <td>{{ "%.2f"|format(stock.target) if stock.target else 'N/A' }}</td>
                     </tr>
                     {% endfor %}
                 </tbody>
             </table>
         {% else %}
-            <p class="info">No strong Buy/Sell signals generated based on the current strategy.</p>
+            <p class="info">No stock data processed or available in cache.</p>
         {% endif %}
     </div>
 
@@ -78,22 +65,16 @@
         <h2>Paper Trading Portfolio</h2>
         {% if paper_portfolio %}
             <div class="portfolio-summary">
-                <p><strong>Total Portfolio Value:</strong> ₹ {{ "%.2f"|format(paper_portfolio.total_value) }}</p>
-                <p><strong>Cash Balance:</strong> ₹ {{ "%.2f"|format(paper_portfolio.cash) }}</p>
+                <p><strong>Total Portfolio Value:</strong> ₹ {{ "%.2f"|format(paper_portfolio.total_value) if paper_portfolio.total_value != 'Error' else 'Error' }}</p>
+                <p><strong>Cash Balance:</strong> ₹ {{ "%.2f"|format(paper_portfolio.cash) if paper_portfolio.cash != 'Error' else 'Error' }}</p>
                 <p><strong>Initial Capital:</strong> ₹ {{ "%.2f"|format(initial_capital) }}</p>
             </div>
-
             {% if paper_portfolio.holdings %}
                 <h3>Current Holdings</h3>
                 <table>
                     <thead>
                         <tr>
-                            <th>Symbol</th>
-                            <th>Quantity</th>
-                            <th>Buy Price</th>
-                            <th>Current Price</th>
-                            <th>Current Value</th>
-                            <th>P/L</th>
+                            <th>Symbol</th><th>Quantity</th><th>Buy Price</th><th>Current Price</th><th>Current Value</th><th>P/L</th>
                         </tr>
                     </thead>
                     <tbody>
@@ -104,7 +85,7 @@
                             <td>{{ "%.2f"|format(holding.buy_price) }}</td>
                             <td>{{ "%.2f"|format(holding.current_price) if holding.current_price != 'N/A' else 'N/A' }}</td>
                             <td>{{ "%.2f"|format(holding.value) }}</td>
-                            <td class="{% if holding.pnl > 0 %}buy{% elif holding.pnl < 0 %}sell{% endif %}">{{ "%.2f"|format(holding.pnl) }}</td>
+                            <td class="{% if holding.pnl > 0 %}positive{% elif holding.pnl < 0 %}negative{% else %}neutral{% endif %}">{{ "%.2f"|format(holding.pnl) }}</td>
                         </tr>
                         {% endfor %}
                     </tbody>
@@ -112,24 +93,21 @@
             {% else %}
                 <p class="info">No holdings in the portfolio.</p>
             {% endif %}
-
             {% if trades_executed %}
-                <h3>Recent Paper Trades</h3>
+                <h3>Recent Paper Trades (Last Update)</h3>
                 <div class="trade-log">
-                    {% for trade in trades_executed %}
-                    <p>{{ trade }}</p>
-                    {% endfor %}
+                    {% for trade in trades_executed %} <p>{{ trade }}</p> {% endfor %}
                 </div>
             {% endif %}
-
         {% else %}
             <p class="info">Paper trading data not available.</p>
         {% endif %}
     </div>
 
     <!-- Backtesting Section -->
-    <div class="container">
-        <h2>Backtesting Example (RELIANCE.NS)</h2>
+    <!-- ... (Keep existing backtesting section as is) ... -->
+     <div class="container">
+        <h2>Backtesting Example ({{ backtest_results.performance.symbol if backtest_results and backtest_results.performance else BACKTEST_SYMBOL }})</h2>
         {% if backtest_results %}
             {% if backtest_results.error %}
                 <p class="error">{{ backtest_results.error }}</p>
@@ -137,7 +115,6 @@
                 {% set perf = backtest_results.performance %}
                 <h3>Performance Summary</h3>
                 <div class="portfolio-summary">
-                     <p><strong>Symbol:</strong> {{ perf.symbol }}</p>
                      <p><strong>Period:</strong> {{ perf.period_start }} to {{ perf.period_end }}</p>
                      <p><strong>Initial Capital:</strong> ₹ {{ "%.2f"|format(perf.initial_capital) }}</p>
                      <p><strong>Final Value:</strong> ₹ {{ "%.2f"|format(perf.final_portfolio_value) }}</p>
@@ -145,25 +122,16 @@
                      <p><strong>Max Drawdown (Simple):</strong> {{ "%.2f"|format(perf.max_drawdown_pct) }} %</p>
                      <p><strong>Number of Trades:</strong> {{ perf.number_of_trades }}</p>
                 </div>
-
                 {% if backtest_results.trades %}
                     <h3>Trades Executed (Sample)</h3>
                      <table>
-                        <thead>
-                            <tr>
-                                <th>Date</th>
-                                <th>Type</th>
-                                <th>Price</th>
-                                <th>Quantity</th>
-                            </tr>
-                        </thead>
+                        <thead><tr><th>Date</th><th>Type</th><th>Price</th><th>Quantity</th></tr></thead>
                         <tbody>
                             {% for trade in backtest_results.trades %}
                             <tr>
                                 <td>{{ trade.date }}</td>
                                 <td class="{% if trade.type == 'BUY' %}buy{% else %}sell{% endif %}">{{ trade.type }}</td>
-                                <td>{{ "%.2f"|format(trade.price) }}</td>
-                                <td>{{ trade.quantity }}</td>
+                                <td>{{ "%.2f"|format(trade.price) }}</td><td>{{ trade.quantity }}</td>
                             </tr>
                             {% endfor %}
                         </tbody>
