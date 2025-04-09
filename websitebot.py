@@ -673,7 +673,7 @@ class ChartInkScraper:
         
         return rec_type
     
-    def save_recommendations(self):
+   def save_recommendations(self):
     """Save recommendations to database and return new ones"""
     new_recommendations = []
     conn = sqlite3.connect('recommendations.db')
@@ -729,7 +729,7 @@ class ChartInkScraper:
         return []
     finally:
         conn.close()
-
+        
 # Add Telegram notification functionality
 def send_telegram_notification(message):
     """Send notification via Telegram"""
