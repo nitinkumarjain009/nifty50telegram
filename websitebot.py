@@ -43,9 +43,178 @@ class ScanResult(db.Model):
     scan_time = db.Column(db.DateTime, nullable=False)
     data = db.Column(db.Text, nullable=False)  # JSON string
 
-# Create tables if they don't exist
-with app.app_context():
-    db.create_all()
+# Create templates directory
+def create_templates():
+    # Create templates directory if it doesn't exist
+    if not os.path.exists('templates'):
+        os.makedirs('templates')
+    
+    # Create index.html template
+    with open('templates/index.html', 'w') as f:
+        f.write("""
+<!DOCTYPE html>
+<html lang="en">
+<head>
+    <meta charset="UTF-8">
+    <meta name="viewport" content="width=device-width, initial-scale=1.0">
+    <title>ChartInk Stock Scanner</title>
+    <link href="https://cdnjs.cloudflare.com/ajax/libs/bootstrap/5.1.3/css/bootstrap.min.css" rel="stylesheet">
+    <style>
+        body { padding-top: 20px; }
+        .table-responsive { overflow-x: auto; }
+        .timestamp { font-size: 0.8rem; color: #666; }
+    </style>
+</head>
+<body>
+    <div class="container">
+        <h1 class="mb-4">ChartInk Stock Scanner</h1>
+        
+        <div class="card mb-4">
+            <div class="card-header d-flex justify-content-between align-items-center">
+                <h5 class="mb-0">Current Status</h5>
+                <div class="timestamp">
+                    Current time: {{ current_time }} IST
+                    {% if is_market_hours %}
+                        <span class="badge bg-success">Market Open</span>
+                    {% else %}
+                        <span class="badge bg-secondary">Market Closed</span>
+                    {% endif %}
+                </div>
+            </div>
+            <div class="card-body">
+                <a href="{{ url_for('force_scan') }}" class="btn btn-primary">Force Scan Now</a>
+                <p class="mt-2">
+                    {% if is_market_hours %}
+                        Next automatic scan in 10 minutes.
+                    {% else %}
+                        Next automatic scan at 9:15 AM on the next trading day.
+                    {% endif %}
+                </p>
+                
+                {% with messages = get_flashed_messages(with_categories=true) %}
+                    {% if messages %}
+                        {% for category, message in messages %}
+                            <div class="alert alert-{{ category }} mt-3">{{ message }}</div>
+                        {% endfor %}
+                    {% endif %}
+                {% endwith %}
+            </div>
+        </div>
+        
+        <div class="card mb-4">
+            <div class="card-header">
+                <h5 class="mb-0">Add ChartInk URL</h5>
+            </div>
+            <div class="card-body">
+                <form action="{{ url_for('add_url') }}" method="post" class="row g-3">
+                    <div class="col-md-6">
+                        <label for="url" class="form-label">ChartInk URL</label>
+                        <input type="url" class="form-control" id="url" name="url" required placeholder="https://chartink.com/screener/...">
+                    </div>
+                    <div class="col-md-4">
+                        <label for="name" class="form-label">Friendly Name</label>
+                        <input type="text" class="form-control" id="name" name="name" required placeholder="e.g., Above 20 EMA">
+                    </div>
+                    <div class="col-md-2 d-flex align-items-end">
+                        <button type="submit" class="btn btn-success w-100">Add URL</button>
+                    </div>
+                </form>
+            </div>
+        </div>
+        
+        <div class="card mb-4">
+            <div class="card-header">
+                <h5 class="mb-0">Configured URLs</h5>
+            </div>
+            <div class="card-body">
+                {% if urls %}
+                    <div class="table-responsive">
+                        <table class="table table-striped table-hover">
+                            <thead>
+                                <tr>
+                                    <th>Name</th>
+                                    <th>URL</th>
+                                    <th>Status</th>
+                                    <th>Actions</th>
+                                </tr>
+                            </thead>
+                            <tbody>
+                                {% for url in urls %}
+                                    <tr>
+                                        <td>{{ url.name }}</td>
+                                        <td><a href="{{ url.url }}" target="_blank">{{ url.url }}</a></td>
+                                        <td>
+                                            {% if url.active %}
+                                                <span class="badge bg-success">Active</span>
+                                            {% else %}
+                                                <span class="badge bg-danger">Inactive</span>
+                                            {% endif %}
+                                        </td>
+                                        <td>
+                                            <a href="{{ url_for('toggle_url', url_id=url.id) }}" class="btn btn-sm {{ 'btn-warning' if url.active else 'btn-success' }}">
+                                                {{ 'Deactivate' if url.active else 'Activate' }}
+                                            </a>
+                                            <a href="{{ url_for('delete_url', url_id=url.id) }}" class="btn btn-sm btn-danger" onclick="return confirm('Are you sure you want to delete this URL?')">Delete</a>
+                                        </td>
+                                    </tr>
+                                {% endfor %}
+                            </tbody>
+                        </table>
+                    </div>
+                {% else %}
+                    <p class="text-muted">No URLs configured yet. Add one above to get started.</p>
+                {% endif %}
+            </div>
+        </div>
+        
+        {% for url in urls %}
+            {% if url.id in scan_results %}
+                <div class="card mb-4">
+                    <div class="card-header d-flex justify-content-between align-items-center">
+                        <h5 class="mb-0">{{ url.name }}</h5>
+                        <span class="timestamp">Last scanned: {{ scan_results[url.id].time }} IST</span>
+                    </div>
+                    <div class="card-body">
+                        {% if scan_results[url.id].data|length > 0 %}
+                            <div class="table-responsive">
+                                <table class="table table-sm table-striped table-hover">
+                                    <thead>
+                                        <tr>
+                                            {% for key in scan_results[url.id].data[0].keys() %}
+                                                <th>{{ key }}</th>
+                                            {% endfor %}
+                                        </tr>
+                                    </thead>
+                                    <tbody>
+                                        {% for row in scan_results[url.id].data %}
+                                            <tr>
+                                                {% for key, value in row.items() %}
+                                                    <td>{{ value }}</td>
+                                                {% endfor %}
+                                            </tr>
+                                        {% endfor %}
+                                    </tbody>
+                                </table>
+                            </div>
+                        {% else %}
+                            <p class="text-muted">No stocks matched the criteria in the last scan.</p>
+                        {% endif %}
+                    </div>
+                </div>
+            {% endif %}
+        {% endfor %}
+    </div>
+    
+    <script src="https://cdnjs.cloudflare.com/ajax/libs/bootstrap/5.1.3/js/bootstrap.bundle.min.js"></script>
+    <script>
+        // Auto-refresh the page every 5 minutes
+        setTimeout(function() {
+            location.reload();
+        }, 5 * 60 * 1000);
+    </script>
+</body>
+</html>
+        """)
 
 # Helper functions
 def is_market_hours():
@@ -317,182 +486,15 @@ def force_scan():
     flash('Scan initiated', 'info')
     return redirect(url_for('index'))
 
-# HTML templates
-@app.before_first_request
-def create_templates():
-    # Create templates directory if it doesn't exist
-    if not os.path.exists('templates'):
-        os.makedirs('templates')
-    
-    # Create index.html template
-    with open('templates/index.html', 'w') as f:
-        f.write("""
-<!DOCTYPE html>
-<html lang="en">
-<head>
-    <meta charset="UTF-8">
-    <meta name="viewport" content="width=device-width, initial-scale=1.0">
-    <title>ChartInk Stock Scanner</title>
-    <link href="https://cdnjs.cloudflare.com/ajax/libs/bootstrap/5.1.3/css/bootstrap.min.css" rel="stylesheet">
-    <style>
-        body { padding-top: 20px; }
-        .table-responsive { overflow-x: auto; }
-        .timestamp { font-size: 0.8rem; color: #666; }
-    </style>
-</head>
-<body>
-    <div class="container">
-        <h1 class="mb-4">ChartInk Stock Scanner</h1>
-        
-        <div class="card mb-4">
-            <div class="card-header d-flex justify-content-between align-items-center">
-                <h5 class="mb-0">Current Status</h5>
-                <div class="timestamp">
-                    Current time: {{ current_time }} IST
-                    {% if is_market_hours %}
-                        <span class="badge bg-success">Market Open</span>
-                    {% else %}
-                        <span class="badge bg-secondary">Market Closed</span>
-                    {% endif %}
-                </div>
-            </div>
-            <div class="card-body">
-                <a href="{{ url_for('force_scan') }}" class="btn btn-primary">Force Scan Now</a>
-                <p class="mt-2">
-                    {% if is_market_hours %}
-                        Next automatic scan in 10 minutes.
-                    {% else %}
-                        Next automatic scan at 9:15 AM on the next trading day.
-                    {% endif %}
-                </p>
-                
-                {% with messages = get_flashed_messages(with_categories=true) %}
-                    {% if messages %}
-                        {% for category, message in messages %}
-                            <div class="alert alert-{{ category }} mt-3">{{ message }}</div>
-                        {% endfor %}
-                    {% endif %}
-                {% endwith %}
-            </div>
-        </div>
-        
-        <div class="card mb-4">
-            <div class="card-header">
-                <h5 class="mb-0">Add ChartInk URL</h5>
-            </div>
-            <div class="card-body">
-                <form action="{{ url_for('add_url') }}" method="post" class="row g-3">
-                    <div class="col-md-6">
-                        <label for="url" class="form-label">ChartInk URL</label>
-                        <input type="url" class="form-control" id="url" name="url" required placeholder="https://chartink.com/screener/...">
-                    </div>
-                    <div class="col-md-4">
-                        <label for="name" class="form-label">Friendly Name</label>
-                        <input type="text" class="form-control" id="name" name="name" required placeholder="e.g., Above 20 EMA">
-                    </div>
-                    <div class="col-md-2 d-flex align-items-end">
-                        <button type="submit" class="btn btn-success w-100">Add URL</button>
-                    </div>
-                </form>
-            </div>
-        </div>
-        
-        <div class="card mb-4">
-            <div class="card-header">
-                <h5 class="mb-0">Configured URLs</h5>
-            </div>
-            <div class="card-body">
-                {% if urls %}
-                    <div class="table-responsive">
-                        <table class="table table-striped table-hover">
-                            <thead>
-                                <tr>
-                                    <th>Name</th>
-                                    <th>URL</th>
-                                    <th>Status</th>
-                                    <th>Actions</th>
-                                </tr>
-                            </thead>
-                            <tbody>
-                                {% for url in urls %}
-                                    <tr>
-                                        <td>{{ url.name }}</td>
-                                        <td><a href="{{ url.url }}" target="_blank">{{ url.url }}</a></td>
-                                        <td>
-                                            {% if url.active %}
-                                                <span class="badge bg-success">Active</span>
-                                            {% else %}
-                                                <span class="badge bg-danger">Inactive</span>
-                                            {% endif %}
-                                        </td>
-                                        <td>
-                                            <a href="{{ url_for('toggle_url', url_id=url.id) }}" class="btn btn-sm {{ 'btn-warning' if url.active else 'btn-success' }}">
-                                                {{ 'Deactivate' if url.active else 'Activate' }}
-                                            </a>
-                                            <a href="{{ url_for('delete_url', url_id=url.id) }}" class="btn btn-sm btn-danger" onclick="return confirm('Are you sure you want to delete this URL?')">Delete</a>
-                                        </td>
-                                    </tr>
-                                {% endfor %}
-                            </tbody>
-                        </table>
-                    </div>
-                {% else %}
-                    <p class="text-muted">No URLs configured yet. Add one above to get started.</p>
-                {% endif %}
-            </div>
-        </div>
-        
-        {% for url in urls %}
-            {% if url.id in scan_results %}
-                <div class="card mb-4">
-                    <div class="card-header d-flex justify-content-between align-items-center">
-                        <h5 class="mb-0">{{ url.name }}</h5>
-                        <span class="timestamp">Last scanned: {{ scan_results[url.id].time }} IST</span>
-                    </div>
-                    <div class="card-body">
-                        {% if scan_results[url.id].data|length > 0 %}
-                            <div class="table-responsive">
-                                <table class="table table-sm table-striped table-hover">
-                                    <thead>
-                                        <tr>
-                                            {% for key in scan_results[url.id].data[0].keys() %}
-                                                <th>{{ key }}</th>
-                                            {% endfor %}
-                                        </tr>
-                                    </thead>
-                                    <tbody>
-                                        {% for row in scan_results[url.id].data %}
-                                            <tr>
-                                                {% for key, value in row.items() %}
-                                                    <td>{{ value }}</td>
-                                                {% endfor %}
-                                            </tr>
-                                        {% endfor %}
-                                    </tbody>
-                                </table>
-                            </div>
-                        {% else %}
-                            <p class="text-muted">No stocks matched the criteria in the last scan.</p>
-                        {% endif %}
-                    </div>
-                </div>
-            {% endif %}
-        {% endfor %}
-    </div>
-    
-    <script src="https://cdnjs.cloudflare.com/ajax/libs/bootstrap/5.1.3/js/bootstrap.bundle.min.js"></script>
-    <script>
-        // Auto-refresh the page every 5 minutes
-        setTimeout(function() {
-            location.reload();
-        }, 5 * 60 * 1000);
-    </script>
-</body>
-</html>
-        """)
-
 # Main function
 def main():
+    # Create database tables
+    with app.app_context():
+        db.create_all()
+    
+    # Create template files
+    create_templates()
+    
     # Start the scheduler thread
     scheduler_thread = threading.Thread(target=run_scheduled_task)
     scheduler_thread.daemon = True
