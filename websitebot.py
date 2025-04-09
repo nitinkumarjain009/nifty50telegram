@@ -41,11 +41,12 @@ def init_db():
         url TEXT NOT NULL,
         selector TEXT,
         is_table INTEGER DEFAULT 0,
-        table_ticker_col INTEGER DEFAULT 0,
-        table_company_col INTEGER DEFAULT 1,
-        table_price_col INTEGER DEFAULT 2,
-        table_target_col INTEGER DEFAULT 3,
-        table_rec_col INTEGER DEFAULT 4,
+        table_sr_col INTEGER DEFAULT 0,
+        table_stock_name_col INTEGER DEFAULT 1,
+        table_symbol_col INTEGER DEFAULT 2,
+        table_links_col INTEGER DEFAULT -1,
+        table_pct_chg_col INTEGER DEFAULT 3,
+        table_volume_col INTEGER DEFAULT 4,
         active INTEGER DEFAULT 1
     )
     ''')
@@ -54,13 +55,13 @@ def init_db():
     CREATE TABLE IF NOT EXISTS recommendations (
         id INTEGER PRIMARY KEY AUTOINCREMENT,
         site_id INTEGER,
-        ticker TEXT,
-        company TEXT,
-        current_price TEXT,
-        target_price TEXT,
+        sr_num TEXT,
+        stock_name TEXT,
+        symbol TEXT,
+        links TEXT,
+        pct_change TEXT,
+        volume TEXT,
         recommendation_type TEXT,
-        analyst TEXT,
-        date TEXT,
         raw_data TEXT,
         hash TEXT UNIQUE,
         processed_at TIMESTAMP DEFAULT CURRENT_TIMESTAMP,
@@ -75,7 +76,8 @@ init_db()
 
 class RecommendationScraper:
     def __init__(self, site_id, name, url, selector=None, is_table=False, 
-                 ticker_col=0, company_col=1, price_col=2, target_col=3, rec_col=4, headers=None):
+                 sr_col=0, stock_name_col=1, symbol_col=2, links_col=-1, 
+                 pct_chg_col=3, volume_col=4, headers=None):
         """
         Initialize the scraper with the target URL and options.
         
@@ -83,9 +85,9 @@ class RecommendationScraper:
             site_id (int): Database ID of the site
             name (str): Name of the site
             url (str): The target website URL to scrape
-            selector (str, optional): CSS selector for finding recommendations or tables
+            selector (str, optional): CSS selector for finding tables
             is_table (bool): Whether to process as HTML table
-            ticker_col, company_col, etc.: Column indices for table extraction
+            sr_col, stock_name_col, etc.: Column indices for table extraction
             headers (dict, optional): HTTP headers to use for the request
         """
         self.site_id = site_id
@@ -93,11 +95,12 @@ class RecommendationScraper:
         self.url = url
         self.selector = selector
         self.is_table = is_table
-        self.ticker_col = ticker_col
-        self.company_col = company_col
-        self.price_col = price_col
-        self.target_col = target_col
-        self.rec_col = rec_col
+        self.sr_col = sr_col
+        self.stock_name_col = stock_name_col  
+        self.symbol_col = symbol_col
+        self.links_col = links_col
+        self.pct_chg_col = pct_chg_col
+        self.volume_col = volume_col
         self.headers = headers or {
             'User-Agent': 'Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/91.0.4472.124 Safari/537.36'
         }
@@ -115,7 +118,7 @@ class RecommendationScraper:
     
     def parse_recommendations(self, html_content):
         """
-        Parse buy and sell recommendations from HTML content.
+        Parse stock information from HTML content.
         
         Args:
             html_content (str): The HTML content to parse
@@ -126,12 +129,12 @@ class RecommendationScraper:
         soup = BeautifulSoup(html_content, 'html.parser')
         
         if self.is_table:
-            self._parse_table_recommendations(soup)
+            self._parse_table_stock_data(soup)
         else:
-            self._parse_standard_recommendations(soup)
+            logger.warning(f"Non-table parsing not implemented for {self.name}. Use is_table=True.")
     
-    def _parse_table_recommendations(self, soup):
-        """Parse recommendations from HTML tables"""
+    def _parse_table_stock_data(self, soup):
+        """Parse stock data from HTML tables"""
         # Find tables
         tables = []
         if self.selector:
@@ -149,39 +152,57 @@ class RecommendationScraper:
                 
                 for row in rows[start_index:]:
                     cells = row.find_all(['td', 'th'])
-                    if len(cells) <= max(self.ticker_col, self.company_col, self.price_col, self.target_col, self.rec_col):
+                    max_col = max(
+                        self.sr_col, 
+                        self.stock_name_col, 
+                        self.symbol_col, 
+                        self.pct_chg_col, 
+                        self.volume_col
+                    )
+                    
+                    # Also check links_col only if it's positive
+                    if self.links_col >= 0:
+                        max_col = max(max_col, self.links_col)
+                        
+                    if len(cells) <= max_col:
                         continue  # Skip rows with insufficient columns
                     
                     # Extract data from cells
-                    ticker = self._clean_text(cells[self.ticker_col].text) if self.ticker_col < len(cells) else "N/A"
-                    company = self._clean_text(cells[self.company_col].text) if self.company_col < len(cells) else "N/A"
-                    current_price = self._clean_text(cells[self.price_col].text) if self.price_col < len(cells) else "N/A"
-                    target_price = self._clean_text(cells[self.target_col].text) if self.target_col < len(cells) else "N/A"
-                    rec_text = self._clean_text(cells[self.rec_col].text) if self.rec_col < len(cells) else "N/A"
+                    sr_num = self._clean_text(cells[self.sr_col].text) if self.sr_col < len(cells) else "N/A"
+                    stock_name = self._clean_text(cells[self.stock_name_col].text) if self.stock_name_col < len(cells) else "N/A"
+                    symbol = self._clean_text(cells[self.symbol_col].text) if self.symbol_col < len(cells) else "N/A"
+                    pct_change = self._clean_text(cells[self.pct_chg_col].text) if self.pct_chg_col < len(cells) else "N/A"
+                    volume = self._clean_text(cells[self.volume_col].text) if self.volume_col < len(cells) else "N/A"
                     
-                    # Skip if ticker is missing or looks like a header
-                    if ticker == "N/A" or ticker.lower() in ["symbol", "ticker", "stock", "company"]:
+                    # Extract links if present
+                    links = ""
+                    if self.links_col >= 0 and self.links_col < len(cells):
+                        link_elements = cells[self.links_col].find_all('a', href=True)
+                        links = ', '.join([a.get('href', '') for a in link_elements])
+                    
+                    # Skip if stock name or symbol is missing or looks like a header
+                    if (stock_name == "N/A" and symbol == "N/A") or stock_name.lower() in ["stock name", "company", "name"]:
                         continue
                     
-                    # Determine recommendation type
-                    rec_type = self._determine_recommendation_type(rec_text)
+                    # Determine recommendation type based on % change
+                    rec_type = self._determine_recommendation_type(pct_change)
                     
                     # Get all cell text for raw data
                     raw_data = " | ".join([self._clean_text(cell.text) for cell in cells])
                     
                     # Create hash for uniqueness checking
-                    unique_data = f"{ticker}|{company}|{current_price}|{target_price}|{rec_type}|{raw_data}"
+                    unique_data = f"{sr_num}|{stock_name}|{symbol}|{pct_change}|{volume}"
                     unique_hash = hashlib.md5(unique_data.encode()).hexdigest()
                     
                     recommendation = {
                         'site_id': self.site_id,
-                        'ticker': ticker,
-                        'company': company,
-                        'current_price': current_price,
-                        'target_price': target_price,
+                        'sr_num': sr_num,
+                        'stock_name': stock_name,
+                        'symbol': symbol,
+                        'links': links,
+                        'pct_change': pct_change,
+                        'volume': volume,
                         'recommendation_type': rec_type,
-                        'analyst': self.name,  # Use site name as analyst for table data
-                        'date': datetime.now().strftime("%Y-%m-%d"),
                         'raw_data': raw_data,
                         'hash': unique_hash,
                         'processed_at': datetime.now().strftime("%Y-%m-%d %H:%M:%S")
@@ -191,66 +212,6 @@ class RecommendationScraper:
             except Exception as e:
                 logger.error(f"Error parsing table in {self.name}: {e}")
     
-    def _parse_standard_recommendations(self, soup):
-        """Parse recommendations from standard HTML elements"""
-        # Use the site-specific selector if provided
-        if self.selector:
-            recommendation_elements = soup.select(self.selector)
-        else:
-            # Default: look for common patterns in financial sites
-            recommendation_elements = soup.select('.recommendation, .stock-recommendation, .buy-rec, .sell-rec, article.recommendation')
-            
-        for element in recommendation_elements:
-            try:
-                # Extract data - modify these based on the actual website structure
-                ticker = element.select_one('.ticker, .symbol')
-                ticker = self._clean_text(ticker.text) if ticker else "N/A"
-                
-                company = element.select_one('.company, .name')
-                company = self._clean_text(company.text) if company else "N/A"
-                
-                price = element.select_one('.price, .current-price')
-                price = self._clean_text(price.text) if price else "N/A"
-                
-                target = element.select_one('.target, .target-price')
-                target = self._clean_text(target.text) if target else "N/A"
-                
-                analyst = element.select_one('.analyst, .source')
-                analyst = self._clean_text(analyst.text) if analyst else self.name
-                
-                date = element.select_one('.date, .pub-date')
-                date = self._clean_text(date.text) if date else datetime.now().strftime("%Y-%m-%d")
-                
-                # Determine if it's a buy or sell recommendation
-                rec_type_elem = element.select_one('.recommendation-type, .rec-type, .rating')
-                rec_text = self._clean_text(rec_type_elem.text) if rec_type_elem else ""
-                rec_type = self._determine_recommendation_type(rec_text)
-                
-                # Get raw content for storage
-                raw_data = element.text.strip()
-                
-                # Create hash for uniqueness checking
-                unique_data = f"{ticker}|{company}|{price}|{target}|{rec_type}|{analyst}|{date}"
-                unique_hash = hashlib.md5(unique_data.encode()).hexdigest()
-                
-                recommendation = {
-                    'site_id': self.site_id,
-                    'ticker': ticker,
-                    'company': company,
-                    'current_price': price,
-                    'target_price': target,
-                    'recommendation_type': rec_type,
-                    'analyst': analyst,
-                    'date': date,
-                    'raw_data': raw_data[:500],  # Limit raw data length
-                    'hash': unique_hash,
-                    'processed_at': datetime.now().strftime("%Y-%m-%d %H:%M:%S")
-                }
-                
-                self.recommendations.append(recommendation)
-            except Exception as e:
-                logger.error(f"Error parsing recommendation element on {self.name}: {e}")
-    
     def _clean_text(self, text):
         """Clean and normalize text from HTML"""
         if not text:
@@ -259,21 +220,38 @@ class RecommendationScraper:
         text = re.sub(r'\s+', ' ', text)  # Replace multiple spaces with single space
         return text
     
-    def _determine_recommendation_type(self, text):
-        """Determine recommendation type from text"""
-        if not text:
+    def _determine_recommendation_type(self, pct_change):
+        """Determine recommendation type based on percentage change"""
+        if not pct_change or pct_change == "N/A":
             return "Unknown"
             
-        text = text.lower()
+        # Try to extract a number from the percentage change text
+        match = re.search(r'([+-]?\d+\.?\d*)%?', pct_change)
+        if match:
+            try:
+                change_val = float(match.group(1))
+                if change_val > 2.0:  # Strong positive change
+                    return "Buy"
+                elif change_val > 0:  # Moderate positive change
+                    return "Hold"
+                elif change_val < -2.0:  # Strong negative change
+                    return "Sell"
+                else:  # Moderate negative change
+                    return "Hold"
+            except ValueError:
+                pass
+        
+        # Fallback logic based on text indicators
+        text = pct_change.lower()
         
         # Buy indicators
-        if any(term in text for term in ['buy', 'long', 'bullish', 'overweight', 'accumulate', 'add', 'outperform']):
+        if any(term in text for term in ['buy', 'long', 'bullish', 'overweight', '+', 'up']):
             return "Buy"
         # Sell indicators
-        elif any(term in text for term in ['sell', 'short', 'bearish', 'underweight', 'reduce', 'underperform']):
+        elif any(term in text for term in ['sell', 'short', 'bearish', 'underweight', '-', 'down']):
             return "Sell"
         # Hold indicators
-        elif any(term in text for term in ['hold', 'neutral', 'market perform', 'equal weight']):
+        elif any(term in text for term in ['hold', 'neutral', 'market perform']):
             return "Hold"
         
         return "Unknown"
@@ -298,11 +276,11 @@ class RecommendationScraper:
                     # Insert new recommendation
                     cursor.execute("""
                     INSERT INTO recommendations 
-                    (site_id, ticker, company, current_price, target_price, recommendation_type, analyst, date, raw_data, hash)
+                    (site_id, sr_num, stock_name, symbol, links, pct_change, volume, recommendation_type, raw_data, hash)
                     VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
                     """, (
-                        rec['site_id'], rec['ticker'], rec['company'], rec['current_price'], 
-                        rec['target_price'], rec['recommendation_type'], rec['analyst'], rec['date'], rec['raw_data'], rec['hash']
+                        rec['site_id'], rec['sr_num'], rec['stock_name'], rec['symbol'], 
+                        rec['links'], rec['pct_change'], rec['volume'], rec['recommendation_type'], rec['raw_data'], rec['hash']
                     ))
                     
                     # Get the ID of the newly inserted recommendation
@@ -326,7 +304,7 @@ class RecommendationScraper:
         if html_content:
             self.parse_recommendations(html_content)
             new_recommendations = self.save_recommendations()
-            logger.info(f"Found {len(self.recommendations)} recommendations, {len(new_recommendations)} are new")
+            logger.info(f"Found {len(self.recommendations)} stocks, {len(new_recommendations)} are new")
             return new_recommendations
         return []
 
@@ -348,18 +326,16 @@ def send_telegram_notification(recommendation):
         emoji = "⚪"
         
     message = f"{emoji} *{recommendation['recommendation_type'].upper()} RECOMMENDATION*\n\n" \
-              f"*Ticker:* {recommendation['ticker']}\n" \
-              f"*Company:* {recommendation['company']}\n" \
-              f"*Current Price:* {recommendation['current_price']}\n" \
-              f"*Target Price:* {recommendation['target_price']}\n" \
-              f"*Source:* {recommendation['analyst']}\n" \
-              f"*Date:* {recommendation['date']}\n"
+              f"*Symbol:* {recommendation['symbol']}\n" \
+              f"*Stock Name:* {recommendation['stock_name']}\n" \
+              f"*% Change:* {recommendation['pct_change']}\n" \
+              f"*Volume:* {recommendation['volume']}\n" \
+              f"*Source:* {recommendation['site_id']}\n" \
+              f"*Date:* {datetime.now().strftime('%Y-%m-%d')}\n"
     
-    # For table-based recommendations, add any additional data
-    if 'raw_data' in recommendation and recommendation['raw_data']:
-        extra_data = recommendation['raw_data'].replace('|', '\n').strip()
-        if len(extra_data) > 100:  # Limit extra data length
-            extra_data = extra_data[:100] + "..."
+    # Add link if available
+    if recommendation['links']:
+        message += f"*Link:* {recommendation['links']}\n"
     
     # Send the message
     try:
@@ -371,7 +347,7 @@ def send_telegram_notification(recommendation):
         }
         response = requests.post(send_url, json=payload)
         response.raise_for_status()
-        logger.info(f"Sent Telegram notification for {recommendation['ticker']}")
+        logger.info(f"Sent Telegram notification for {recommendation['symbol']}")
         return True
     except Exception as e:
         logger.error(f"Failed to send Telegram notification: {e}")
@@ -388,8 +364,8 @@ def background_scanner():
             cursor = conn.cursor()
             cursor.execute("""
                 SELECT id, name, url, selector, is_table, 
-                table_ticker_col, table_company_col, table_price_col, 
-                table_target_col, table_rec_col 
+                table_sr_col, table_stock_name_col, table_symbol_col, 
+                table_links_col, table_pct_chg_col, table_volume_col 
                 FROM sites WHERE active = 1
             """)
             sites = cursor.fetchall()
@@ -400,11 +376,11 @@ def background_scanner():
             # Scan each site
             for site in sites:
                 try:
-                    site_id, name, url, selector, is_table, ticker_col, company_col, price_col, target_col, rec_col = site
+                    site_id, name, url, selector, is_table, sr_col, stock_name_col, symbol_col, links_col, pct_chg_col, volume_col = site
                     
                     scraper = RecommendationScraper(
                         site_id, name, url, selector, bool(is_table),
-                        ticker_col, company_col, price_col, target_col, rec_col
+                        sr_col, stock_name_col, symbol_col, links_col, pct_chg_col, volume_col
                     )
                     new_recommendations = scraper.run()
                     
@@ -419,7 +395,7 @@ def background_scanner():
                 time.sleep(2)
             
             if total_new_recommendations > 0:
-                logger.info(f"Found {total_new_recommendations} new recommendations across all sites")
+                logger.info(f"Found {total_new_recommendations} new stock recommendations across all sites")
                 
             # Wait for the next scan cycle
             logger.info("Scan cycle completed. Waiting for next cycle...")
@@ -464,11 +440,12 @@ def add_site():
     is_table = int(request.form.get('is_table', 0))
     
     # Table column mappings
-    ticker_col = int(request.form.get('ticker_col', 0))
-    company_col = int(request.form.get('company_col', 1))
-    price_col = int(request.form.get('price_col', 2))
-    target_col = int(request.form.get('target_col', 3))
-    rec_col = int(request.form.get('rec_col', 4))
+    sr_col = int(request.form.get('sr_col', 0))
+    stock_name_col = int(request.form.get('stock_name_col', 1))
+    symbol_col = int(request.form.get('symbol_col', 2))
+    links_col = int(request.form.get('links_col', -1))
+    pct_chg_col = int(request.form.get('pct_chg_col', 3))
+    volume_col = int(request.form.get('volume_col', 4))
     
     if name and url:
         conn = sqlite3.connect('recommendations.db')
@@ -476,11 +453,11 @@ def add_site():
         cursor.execute(
             """
             INSERT INTO sites 
-            (name, url, selector, is_table, table_ticker_col, table_company_col, 
-            table_price_col, table_target_col, table_rec_col) 
-            VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?)
+            (name, url, selector, is_table, table_sr_col, table_stock_name_col, 
+            table_symbol_col, table_links_col, table_pct_chg_col, table_volume_col) 
+            VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
             """,
-            (name, url, selector, is_table, ticker_col, company_col, price_col, target_col, rec_col)
+            (name, url, selector, is_table, sr_col, stock_name_col, symbol_col, links_col, pct_chg_col, volume_col)
         )
         conn.commit()
         conn.close()
@@ -535,8 +512,8 @@ def scan_now():
     cursor = conn.cursor()
     cursor.execute("""
         SELECT id, name, url, selector, is_table, 
-        table_ticker_col, table_company_col, table_price_col, 
-        table_target_col, table_rec_col 
+        table_sr_col, table_stock_name_col, table_symbol_col, 
+        table_links_col, table_pct_chg_col, table_volume_col 
         FROM sites WHERE active = 1
     """)
     sites = cursor.fetchall()
@@ -546,11 +523,11 @@ def scan_now():
     
     for site in sites:
         try:
-            site_id, name, url, selector, is_table, ticker_col, company_col, price_col, target_col, rec_col = site
+            site_id, name, url, selector, is_table, sr_col, stock_name_col, symbol_col, links_col, pct_chg_col, volume_col = site
             
             scraper = RecommendationScraper(
                 site_id, name, url, selector, bool(is_table),
-                ticker_col, company_col, price_col, target_col, rec_col
+                sr_col, stock_name_col, symbol_col, links_col, pct_chg_col, volume_col
             )
             site_new_recommendations = scraper.run()
             
@@ -581,7 +558,7 @@ def create_templates():
 <head>
     <meta charset="UTF-8">
     <meta name="viewport" content="width=device-width, initial-scale=1.0">
-    <title>Stock Recommendation Tracker</title>
+    <title>Stock Data Tracker</title>
     <link href="https://cdn.jsdelivr.net/npm/bootstrap@5.1.3/dist/css/bootstrap.min.css" rel="stylesheet">
     <link href="https://cdn.jsdelivr.net/npm/datatables.net-bs5@1.11.5/css/dataTables.bootstrap5.min.css" rel="stylesheet">
     <style>
@@ -598,7 +575,7 @@ def create_templates():
 </head>
 <body>
     <div class="container">
-        <h1 class="mb-4">Stock Recommendation Tracker</h1>
+        <h1 class="mb-4">Stock Data Tracker</h1>
         
         <ul class="nav nav-tabs mb-4" id="myTab" role="tablist">
             <li class="nav-item" role="presentation">
@@ -607,7 +584,7 @@ def create_templates():
             </li>
             <li class="nav-item" role="presentation">
                 <button class="nav-link" id="recommendations-tab" data-bs-toggle="tab" data-bs-target="#recommendations" 
-                    type="button" role="tab" aria-controls="recommendations" aria-selected="false">Recommendations</button>
+                    type="button" role="tab" aria-controls="recommendations" aria-selected="false">Stocks</button>
             </li>
             <li class="nav-item" role="presentation">
                 <button class="nav-link" id="settings-tab" data-bs-toggle="tab" data-bs-target="#settings" 
@@ -622,7 +599,7 @@ def create_templates():
                     <div class="col-md-12">
                         <div class="card mb-4">
                             <div class="card-header d-flex justify-content-between align-items-center">
-                                <h5 class="mb-0">Recent Stock Recommendations</h5>
+                                <h5 class="mb-0">Recent Stock Data</h5>
                                 <button id="scanNowBtn" class="btn btn-warning">Scan Now</button>
                             </div>
                             <div class="card-body">
@@ -633,31 +610,37 @@ def create_templates():
                                     <table class="table table-hover recommendation-table" id="recommendationsTable">
                                         <thead>
                                             <tr>
+                                                <th>Sr.</th>
                                                 <th>Date</th>
                                                 <th>Source</th>
-                                                <th>Ticker</th>
-                                                <th>Company</th>
+                                                <th>Symbol</th>
+                                                <th>Stock Name</th>
+                                                <th>% Change</th>
+                                                <th>Volume</th>
                                                 <th>Type</th>
-                                                <th>Current</th>
-                                                <th>Target</th>
-                                                <th>Analyst</th>
+                                                <th>Actions</th>
                                             </tr>
                                         </thead>
                                         <tbody>
                                             {% for rec in recommendations %}
                                             <tr class="{{ rec.recommendation_type.lower() }}">
-                                                <td>{{ rec.date }}</td>
+                                                <td>{{ rec.sr_num }}</td>
+                                                <td>{{ rec.processed_at }}</td>
                                                 <td>{{ rec.site_name }}</td>
-                                                <td>{{ rec.ticker }}</td>
-                                                <td>{{ rec.company }}</td>
+                                                <td>{{ rec.symbol }}</td>
+                                                <td>{{ rec.stock_name }}</td>
+                                                <td>{{ rec.pct_change }}</td>
+                                                <td>{{ rec.volume }}</td>
                                                 <td>
                                                     <span class="badge {{ 'bg-success' if rec.recommendation_type == 'Buy' else 'bg-danger' if rec.recommendation_type == 'Sell' else 'bg-warning' if rec.recommendation_type == 'Hold' else 'bg-secondary' }}">
                                                         {{ rec.recommendation_type }}
                                                     </span>
                                                 </td>
-                                                <td>{{ rec.current_price }}</td>
-                                                <td>{{ rec.target_price }}</td>
-                                                <td>{{ rec.analyst }}</td>
+                                                <td>
+                                                    {% if rec.links %}
+                                                    <a href="{{ rec.links }}" target="_blank" class="btn btn-sm btn-info">View</a>
+                                                    {% endif %}
+                                                </td>
                                             </tr>
                                             {% endfor %}
                                         </tbody>
@@ -665,7 +648,7 @@ def create_templates():
                                 </div>
                                 {% else %}
                                 <div class="alert alert-info">
-                                    No recommendations found yet. Add sites in the Settings tab and click "Scan Now" to start collecting recommendations.
+                                    No stock data found yet. Add sites in the Settings tab and click "Scan Now" to start collecting data.
                                 </div>
                                 {% endif %}
                             </div>
@@ -680,38 +663,44 @@ def create_templates():
                     <div class="col-md-12">
                         <div class="card">
                             <div class="card-header">
-                                <h5 class="mb-0">All Stock Recommendations</h5>
+                                <h5 class="mb-0">All Stock Data</h5>
                             </div>
                             <div class="card-body">
                                 <div class="table-responsive">
                                     <table class="table table-hover recommendation-table" id="allRecommendationsTable">
                                         <thead>
                                             <tr>
+                                                <th>Sr.</th>
                                                 <th>Date</th>
                                                 <th>Source</th>
-                                                <th>Ticker</th>
-                                                <th>Company</th>
+                                                <th>Symbol</th>
+                                                <th>Stock Name</th>
+                                                <th>% Change</th>
+                                                <th>Volume</th>
                                                 <th>Type</th>
-                                                <th>Current</th>
-                                                <th>Target</th>
-                                                <th>Analyst</th>
+                                                <th>Actions</th>
                                             </tr>
                                         </thead>
                                         <tbody>
                                             {% for rec in recommendations %}
                                             <tr class="{{ rec.recommendation_type.lower() }}">
-                                                <td>{{ rec.date }}</td>
+                                                <td>{{ rec.sr_num }}</td>
+                                                <td>{{ rec.processed_at }}</td>
                                                 <td>{{ rec.site_name }}</td>
-                                                <td>{{ rec.ticker }}</td>
-                                                <td>{{ rec.company }}</td>
+                                                <td>{{ rec.symbol }}</td>
+                                                <td>{{ rec.stock_name }}</td>
+                                                <td>{{ rec.pct_change }}</td>
+                                                <td>{{ rec.volume }}</td>
                                                 <td>
                                                     <span class="badge {{ 'bg-success' if rec.recommendation_type == 'Buy' else 'bg-danger' if rec.recommendation_type == 'Sell' else 'bg-warning' if rec.recommendation_type == 'Hold' else 'bg-secondary' }}">
                                                         {{ rec.recommendation_type }}
                                                     </span>
                                                 </td>
-                                                <td>{{ rec.current_price }}</td>
-                                                <td>{{ rec.target_price }}</td>
-                                                <td>{{ rec.analyst }}</td>
+                                                <td>
+                                                    {% if rec.links %}
+                                                    <a href="{{ rec.links }}" target="_blank" class="btn btn-sm btn-info">View</a>
+                                                    {% endif %}
+                                                </td>
                                             </tr>
                                             {% endfor %}
                                         </tbody>
@@ -741,8 +730,9 @@ def create_templates():
                                                 <th>ID</th>
                                                 <th>Name</th>
                                                 <th>URL</th>
-                                                <th>Status</th>
+                                                <th>Selector</th>
                                                 <th>Type</th>
+                                                <th>Status</th>
                                                 <th>Actions</th>
                                             </tr>
                                         </thead>
@@ -752,24 +742,22 @@ def create_templates():
                                                 <td>{{ site.id }}</td>
                                                 <td>{{ site.name }}</td>
                                                 <td><a href="{{ site.url }}" target="_blank">{{ site.url }}</a></td>
+                                                <td>{{ site.selector }}</td>
+                                                <td>{{ 'Table' if site.is_table else 'Custom' }}</td>
                                                 <td>
                                                     <span class="badge {{ 'bg-success' if site.active else 'bg-secondary' }}">
                                                         {{ 'Active' if site.active else 'Inactive' }}
                                                     </span>
                                                 </td>
-                                                <td>{{ 'Table' if site.is_table else 'Standard' }}</td>
                                                 <td>
-                                                    <div class="btn-group" role="group">
-                                                        <form action="{{ url_for('toggle_site', site_id=site.id) }}" method="post" class="d-inline">
-                                                            <button type="submit" class="btn btn-sm {{ 'btn-secondary' if site.active else 'btn-success' }}">
-                                                                {{ 'Deactivate' if site.active else 'Activate' }}
-                                                            </button>
-                                                        </form>
-                                                        <form action="{{ url_for('delete_site', site_id=site.id) }}" method="post" class="d-inline ms-1">
-                                                            <button type="submit" class="btn btn-sm btn-danger" 
-                                                                onclick="return confirm('Are you sure you want to delete this site?')">Delete</button>
-                                                        </form>
-                                                    </div>
+                                                    <form method="post" action="{{ url_for('toggle_site', site_id=site.id) }}" class="d-inline">
+                                                        <button type="submit" class="btn btn-sm {{ 'btn-secondary' if site.active else 'btn-primary' }}">
+                                                            {{ 'Deactivate' if site.active else 'Activate' }}
+                                                        </button>
+                                                    </form>
+                                                    <form method="post" action="{{ url_for('delete_site', site_id=site.id) }}" class="d-inline">
+                                                        <button type="submit" class="btn btn-sm btn-danger" onclick="return confirm('Are you sure you want to delete this site?')">Delete</button>
+                                                    </form>
                                                 </td>
                                             </tr>
                                             {% endfor %}
@@ -778,7 +766,7 @@ def create_templates():
                                 </div>
                                 {% else %}
                                 <div class="alert alert-info">
-                                    No sites have been added yet. Click "Add Site" to start monitoring stock recommendations.
+                                    No sites added yet. Use the "Add Site" button to start.
                                 </div>
                                 {% endif %}
                             </div>
@@ -788,150 +776,155 @@ def create_templates():
             </div>
         </div>
     </div>
-    
+
     <!-- Add Site Modal -->
     <div class="modal fade" id="addSiteModal" tabindex="-1" aria-labelledby="addSiteModalLabel" aria-hidden="true">
         <div class="modal-dialog modal-lg">
             <div class="modal-content">
                 <div class="modal-header">
-                    <h5 class="modal-title" id="addSiteModalLabel">Add New Site to Monitor</h5>
+                    <h5 class="modal-title" id="addSiteModalLabel">Add Site</h5>
                     <button type="button" class="btn-close" data-bs-dismiss="modal" aria-label="Close"></button>
                 </div>
-                <form action="{{ url_for('add_site') }}" method="post">
-                    <div class="modal-body">
-                        <div class="row mb-3">
-                            <div class="col-md-6">
-                                <label for="name" class="form-label">Site Name</label>
-                                <input type="text" class="form-control" id="name" name="name" required placeholder="e.g., Motley Fool">
-                            </div>
-                            <div class="col-md-6">
-                                <label for="url" class="form-label">URL</label>
-                                <input type="url" class="form-control" id="url" name="url" required placeholder="https://example.com/recommendations">
-                            </div>
+                <div class="modal-body">
+                    <form action="{{ url_for('add_site') }}" method="post">
+                        <div class="mb-3">
+                            <label for="name" class="form-label">Site Name</label>
+                            <input type="text" class="form-control" id="name" name="name" required>
                         </div>
-                        
+                        <div class="mb-3">
+                            <label for="url" class="form-label">URL</label>
+                            <input type="url" class="form-control" id="url" name="url" required>
+                            <small class="text-muted">Enter the full URL including http:// or https://</small>
+                        </div>
                         <div class="mb-3">
                             <label for="selector" class="form-label">CSS Selector (optional)</label>
-                            <input type="text" class="form-control" id="selector" name="selector" placeholder="e.g., table.recommendations, div.stock-picks">
-                            <div class="form-text">CSS selector to find recommendation elements or tables. Leave blank to use automatic detection.</div>
+                            <input type="text" class="form-control" id="selector" name="selector">
+                            <small class="text-muted">CSS selector to find the table, e.g., "table.stock-data"</small>
                         </div>
                         
                         <div class="form-check mb-3">
-                            <input class="form-check-input" type="checkbox" id="is_table" name="is_table" value="1">
+                            <input class="form-check-input" type="checkbox" value="1" id="is_table" name="is_table" checked>
                             <label class="form-check-label" for="is_table">
-                                This site uses tables for recommendations
+                                Content is a table
                             </label>
                         </div>
                         
-                        <div id="tableOptions" class="row mb-3 d-none">
+                        <div id="tableColumnsSection">
                             <h6>Table Column Mapping</h6>
-                            <div class="col-md-4 mb-2">
-                                <label for="ticker_col" class="form-label">Ticker Column</label>
-                                <input type="number" class="form-control" id="ticker_col" name="ticker_col" value="0" min="0">
+                            <div class="row g-3">
+                                <div class="col-md-2">
+                                    <label for="sr_col" class="form-label">Sr # Col</label>
+                                    <input type="number" class="form-control" id="sr_col" name="sr_col" value="0" min="-1">
+                                </div>
+                                <div class="col-md-2">
+                                    <label for="stock_name_col" class="form-label">Name Col</label>
+                                    <input type="number" class="form-control" id="stock_name_col" name="stock_name_col" value="1" min="-1">
+                                </div>
+                                <div class="col-md-2">
+                                    <label for="symbol_col" class="form-label">Symbol Col</label>
+                                    <input type="number" class="form-control" id="symbol_col" name="symbol_col" value="2" min="-1">
+                                </div>
+                                <div class="col-md-2">
+                                    <label for="links_col" class="form-label">Links Col</label>
+                                    <input type="number" class="form-control" id="links_col" name="links_col" value="-1" min="-1">
+                                </div>
+                                <div class="col-md-2">
+                                    <label for="pct_chg_col" class="form-label">% Change Col</label>
+                                    <input type="number" class="form-control" id="pct_chg_col" name="pct_chg_col" value="3" min="-1">
+                                </div>
+                                <div class="col-md-2">
+                                    <label for="volume_col" class="form-label">Volume Col</label>
+                                    <input type="number" class="form-control" id="volume_col" name="volume_col" value="4" min="-1">
+                                </div>
                             </div>
-                            <div class="col-md-4 mb-2">
-                                <label for="company_col" class="form-label">Company Column</label>
-                                <input type="number" class="form-control" id="company_col" name="company_col" value="1" min="0">
-                            </div>
-                            <div class="col-md-4 mb-2">
-                                <label for="price_col" class="form-label">Current Price Column</label>
-                                <input type="number" class="form-control" id="price_col" name="price_col" value="2" min="0">
-                            </div>
-                            <div class="col-md-4 mb-2">
-                                <label for="target_col" class="form-label">Target Price Column</label>
-                                <input type="number" class="form-control" id="target_col" name="target_col" value="3" min="0">
-                            </div>
-                            <div class="col-md-4 mb-2">
-                                <label for="rec_col" class="form-label">Recommendation Column</label>
-                                <input type="number" class="form-control" id="rec_col" name="rec_col" value="4" min="0">
-                            </div>
-                            <div class="form-text">Column numbers start from 0. First column = 0, second column = 1, etc.</div>
+                            <small class="text-muted">Enter column indices (0-based). Use -1 to ignore a column.</small>
                         </div>
-                    </div>
-                    <div class="modal-footer">
-                        <button type="button" class="btn btn-secondary" data-bs-dismiss="modal">Cancel</button>
-                        <button type="submit" class="btn btn-primary">Add Site</button>
-                    </div>
-                </form>
+                        
+                        <div class="mt-4">
+                            <button type="submit" class="btn btn-primary">Add Site</button>
+                            <button type="button" class="btn btn-secondary" data-bs-dismiss="modal">Cancel</button>
+                        </div>
+                    </form>
+                </div>
             </div>
         </div>
     </div>
 
-    <!-- Scripts -->
     <script src="https://cdn.jsdelivr.net/npm/bootstrap@5.1.3/dist/js/bootstrap.bundle.min.js"></script>
     <script src="https://cdn.jsdelivr.net/npm/jquery@3.6.0/dist/jquery.min.js"></script>
     <script src="https://cdn.jsdelivr.net/npm/datatables.net@1.11.5/js/jquery.dataTables.min.js"></script>
     <script src="https://cdn.jsdelivr.net/npm/datatables.net-bs5@1.11.5/js/dataTables.bootstrap5.min.js"></script>
-    
     <script>
         $(document).ready(function() {
             // Initialize DataTables
-            $('#recommendationsTable, #allRecommendationsTable').DataTable({
-                order: [[0, 'desc']],
+            $('#recommendationsTable').DataTable({
+                order: [[1, 'desc']],
                 pageLength: 10,
-                lengthMenu: [[10, 25, 50, -1], [10, 25, 50, "All"]]
+                responsive: true
+            });
+            
+            $('#allRecommendationsTable').DataTable({
+                order: [[1, 'desc']],
+                pageLength: 25,
+                responsive: true
             });
             
             $('#sitesTable').DataTable({
-                order: [[0, 'asc']],
-                pageLength: 10
+                pageLength: 10,
+                responsive: true
             });
             
-            // Toggle table options in the Add Site modal
-            $('#is_table').change(function() {
-                if($(this).is(':checked')) {
-                    $('#tableOptions').removeClass('d-none');
-                } else {
-                    $('#tableOptions').addClass('d-none');
-                }
-            });
-            
-            // Scan Now button handler
+            // Handle scan now button
             $('#scanNowBtn').click(function() {
                 var btn = $(this);
                 var originalText = btn.text();
-                var status = $('#scanStatus');
                 
-                btn.prop('disabled', true);
-                btn.text('Scanning...');
-                status.removeClass('d-none alert-success alert-danger').addClass('alert-info');
-                status.text('Scanning sites for new recommendations...');
+                btn.prop('disabled', true).text('Scanning...');
+                $('#scanStatus').removeClass('d-none alert-success alert-danger').addClass('alert-info').text('Scanning sites...');
                 
                 $.ajax({
-                    url: '/scan/now',
-                    type: 'POST',
-                    dataType: 'json',
+                    url: '{{ url_for("scan_now") }}',
+                    method: 'POST',
                     success: function(response) {
-                        status.removeClass('alert-info').addClass('alert-success');
-                        status.text('Scan completed! Found ' + response.new_recommendations + ' new recommendations.');
-                        
-                        if(response.new_recommendations > 0) {
-                            setTimeout(function() {
-                                location.reload();
-                            }, 2000);
+                        if(response.success) {
+                            $('#scanStatus').removeClass('alert-info alert-danger').addClass('alert-success')
+                                .text('Scan completed successfully! Found ' + response.new_recommendations + ' new stock recommendations.');
+                            
+                            if(response.new_recommendations > 0) {
+                                setTimeout(function() {
+                                    location.reload();
+                                }, 2000);
+                            }
+                        } else {
+                            $('#scanStatus').removeClass('alert-info alert-success').addClass('alert-danger')
+                                .text('Scan failed: ' + response.error);
                         }
                     },
-                    error: function(xhr, status, error) {
-                        status.removeClass('alert-info').addClass('alert-danger');
-                        status.text('Error scanning sites: ' + error);
+                    error: function() {
+                        $('#scanStatus').removeClass('alert-info alert-success').addClass('alert-danger')
+                            .text('Error connecting to server');
                     },
                     complete: function() {
-                        btn.prop('disabled', false);
-                        btn.text(originalText);
-                        
-                        setTimeout(function() {
-                            status.addClass('d-none');
-                        }, 5000);
+                        btn.prop('disabled', false).text(originalText);
                     }
                 });
+            });
+            
+            // Toggle table columns section based on is_table checkbox
+            $('#is_table').change(function() {
+                if($(this).is(':checked')) {
+                    $('#tableColumnsSection').show();
+                } else {
+                    $('#tableColumnsSection').hide();
+                }
             });
         });
     </script>
 </body>
 </html>
-''')
+            ''')
     
-    # Create recommendations.html template
+    # Create recommendations.html
     if not os.path.exists('templates/recommendations.html'):
         with open('templates/recommendations.html', 'w') as f:
             f.write('''
@@ -940,7 +933,7 @@ def create_templates():
 <head>
     <meta charset="UTF-8">
     <meta name="viewport" content="width=device-width, initial-scale=1.0">
-    <title>All Recommendations - Stock Recommendation Tracker</title>
+    <title>Stock Recommendations</title>
     <link href="https://cdn.jsdelivr.net/npm/bootstrap@5.1.3/dist/css/bootstrap.min.css" rel="stylesheet">
     <link href="https://cdn.jsdelivr.net/npm/datatables.net-bs5@1.11.5/css/dataTables.bootstrap5.min.css" rel="stylesheet">
     <style>
@@ -957,116 +950,88 @@ def create_templates():
 <body>
     <div class="container">
         <div class="d-flex justify-content-between align-items-center mb-4">
-            <h1>All Stock Recommendations</h1>
-            <a href="{{ url_for('index') }}" class="btn btn-secondary">Back to Dashboard</a>
+            <h1>Stock Recommendations</h1>
+            <a href="{{ url_for('index') }}" class="btn btn-primary">Back to Dashboard</a>
         </div>
         
         <div class="card">
+            <div class="card-header">
+                <h5 class="mb-0">All Stock Data</h5>
+            </div>
             <div class="card-body">
-                {% if recommendations %}
                 <div class="table-responsive">
-                    <table class="table table-hover recommendation-table" id="fullRecommendationsTable">
+                    <table class="table table-striped recommendation-table" id="allRecommendationsTable">
                         <thead>
                             <tr>
+                                <th>ID</th>
                                 <th>Date</th>
                                 <th>Source</th>
-                                <th>Ticker</th>
-                                <th>Company</th>
+                                <th>Symbol</th>
+                                <th>Stock Name</th>
+                                <th>% Change</th>
+                                <th>Volume</th>
                                 <th>Type</th>
-                                <th>Current</th>
-                                <th>Target</th>
-                                <th>Analyst</th>
-                                <th>Details</th>
+                                <th>Actions</th>
                             </tr>
                         </thead>
                         <tbody>
                             {% for rec in recommendations %}
                             <tr class="{{ rec.recommendation_type.lower() }}">
-                                <td>{{ rec.date }}</td>
+                                <td>{{ rec.id }}</td>
+                                <td>{{ rec.processed_at }}</td>
                                 <td>{{ rec.site_name }}</td>
-                                <td>{{ rec.ticker }}</td>
-                                <td>{{ rec.company }}</td>
+                                <td>{{ rec.symbol }}</td>
+                                <td>{{ rec.stock_name }}</td>
+                                <td>{{ rec.pct_change }}</td>
+                                <td>{{ rec.volume }}</td>
                                 <td>
                                     <span class="badge {{ 'bg-success' if rec.recommendation_type == 'Buy' else 'bg-danger' if rec.recommendation_type == 'Sell' else 'bg-warning' if rec.recommendation_type == 'Hold' else 'bg-secondary' }}">
                                         {{ rec.recommendation_type }}
                                     </span>
                                 </td>
-                                <td>{{ rec.current_price }}</td>
-                                <td>{{ rec.target_price }}</td>
-                                <td>{{ rec.analyst }}</td>
                                 <td>
-                                    <button class="btn btn-sm btn-info" 
-                                            data-bs-toggle="modal" 
-                                            data-bs-target="#recDetailsModal" 
-                                            data-raw="{{ rec.raw_data }}">
-                                        View
-                                    </button>
+                                    {% if rec.links %}
+                                    <a href="{{ rec.links }}" target="_blank" class="btn btn-sm btn-info">View</a>
+                                    {% endif %}
                                 </td>
                             </tr>
                             {% endfor %}
                         </tbody>
                     </table>
                 </div>
-                {% else %}
-                <div class="alert alert-info">No recommendations found in the database.</div>
-                {% endif %}
             </div>
         </div>
     </div>
-    
-    <!-- Recommendation Details Modal -->
-    <div class="modal fade" id="recDetailsModal" tabindex="-1" aria-labelledby="recDetailsModalLabel" aria-hidden="true">
-        <div class="modal-dialog">
-            <div class="modal-content">
-                <div class="modal-header">
-                    <h5 class="modal-title" id="recDetailsModalLabel">Recommendation Details</h5>
-                    <button type="button" class="btn-close" data-bs-dismiss="modal" aria-label="Close"></button>
-                </div>
-                <div class="modal-body">
-                    <pre id="recRawData" class="border p-3 bg-light" style="white-space: pre-wrap;"></pre>
-                </div>
-                <div class="modal-footer">
-                    <button type="button" class="btn btn-secondary" data-bs-dismiss="modal">Close</button>
-                </div>
-            </div>
-        </div>
-    </div>
-    
-    <!-- Scripts -->
+
     <script src="https://cdn.jsdelivr.net/npm/bootstrap@5.1.3/dist/js/bootstrap.bundle.min.js"></script>
     <script src="https://cdn.jsdelivr.net/npm/jquery@3.6.0/dist/jquery.min.js"></script>
     <script src="https://cdn.jsdelivr.net/npm/datatables.net@1.11.5/js/jquery.dataTables.min.js"></script>
     <script src="https://cdn.jsdelivr.net/npm/datatables.net-bs5@1.11.5/js/dataTables.bootstrap5.min.js"></script>
-    
     <script>
         $(document).ready(function() {
-            // Initialize DataTable
-            $('#fullRecommendationsTable').DataTable({
-                order: [[0, 'desc']],
+            $('#allRecommendationsTable').DataTable({
+                order: [[1, 'desc']],
                 pageLength: 25,
-                lengthMenu: [[10, 25, 50, 100, -1], [10, 25, 50, 100, "All"]]
-            });
-            
-            // Handle view details button
-            $('#recDetailsModal').on('show.bs.modal', function(event) {
-                var button = $(event.relatedTarget);
-                var rawData = button.data('raw');
-                $('#recRawData').text(rawData);
+                responsive: true
             });
         });
     </script>
 </body>
 </html>
-''')
+            ''')
 
-# Main entry point
+
+# Main startup
 if __name__ == '__main__':
-    # Create template files if they don't exist
+    # Create HTML templates
     create_templates()
     
-    # Start background scanning thread
+    # Initialize database
+    init_db()
+    
+    # Start the background scanner in a separate thread
     scanner_thread = threading.Thread(target=background_scanner, daemon=True)
     scanner_thread.start()
     
-    # Start Flask application
+    # Run the Flask app
     app.run(host='0.0.0.0', port=5000, debug=True)
