@@ -20,8 +20,8 @@ from telegram import Bot, Update
 from telegram.ext import Application, CommandHandler, MessageHandler, ContextTypes, filters
 
 # Configuration
-TELEGRAM_BOT_TOKEN = "YOUR_TELEGRAM_BOT_TOKEN"
-TELEGRAM_CHAT_ID = "YOUR_TELEGRAM_CHAT_ID"
+TELEGRAM_BOT_TOKEN = "8017759392:AAEwM-W-y83lLXTjlPl8sC_aBmizuIrFXnU"
+TELEGRAM_CHAT_ID = "711856868"
 TELEGRAM_GROUP = "@Stockniftybot"  # Telegram group username
 CSV_FILE_PATH = "nifty50_stocks.csv"
 TEMPLATES_DIR = "templates"
