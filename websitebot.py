@@ -987,15 +987,15 @@ def main():
         
         # Start Telegram message handler
         # Register command handlers
-dispatcher.add_handler(CommandHandler("start", handle_command_start))
-dispatcher.add_handler(CommandHandler("status", handle_command_status))
-dispatcher.add_handler(CommandHandler("recommendations", handle_command_recommendations))
-dispatcher.add_handler(CommandHandler("daily", handle_command_daily))
-dispatcher.add_handler(CommandHandler("analyze", handle_command_analyze))
-dispatcher.add_handler(MessageHandler(Filters.text & ~Filters.command, handle_unknown))
+        dispatcher.add_handler(CommandHandler("start", handle_command_start))
+        dispatcher.add_handler(CommandHandler("status", handle_command_status))
+        dispatcher.add_handler(CommandHandler("recommendations", handle_command_recommendations))
+        dispatcher.add_handler(CommandHandler("daily", handle_command_daily))
+        dispatcher.add_handler(CommandHandler("analyze", handle_command_analyze))
+        dispatcher.add_handler(MessageHandler(Filters.text & ~Filters.command, handle_unknown))
 
-# Start the bot
-updater.start_polling()
+        # Start the bot
+        updater.start_polling()
         print(f"Telegram bot started and listening at {datetime.datetime.now(IST_TIMEZONE).strftime('%Y-%m-%d %H:%M:%S')}")
         
         # Welcome message on bot startup
