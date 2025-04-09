@@ -652,9 +652,9 @@ with open('templates/index.html', 'w') as f:
                                     {% for stock in all_stocks %}
                                         <tr>
                                             <td>{{ stock.symbol }}</td>
-                                            <td>{{ "%.2f"|format(stock.close) }}</td>
+                                            <td>{{ "%.2f"|format(stock.close|default(0)) }}</td>
                                             <td class="{% if stock.change_percent > 0 %}up{% elif stock.change_percent < 0 %}down{% else %}neutral{% endif %}">
-                                                {{ "%.2f"|format(stock.change_percent) }}%
+                                                {{ "%.2f"|format(stock.change_percent|default(0)) }}%
                                             </td>
                                             <td>
                                                 {% if stock.recommendation == 'STRONG BUY' %}
@@ -672,286 +672,282 @@ with open('templates/index.html', 'w') as f:
                                             <td>
                                                 {% if 'BUY' in stock.recommendation %}
                                                     <div class="strength-indicator">
-                                                        <div class="strength-indicator-bar-buy" style="width: {{ stock.signal_strength*10 }}%;"></div>
+                                                        <div class="strength-indicator-bar-buy" style="width: {{ (stock.signal_strength|default(0))*10 }}%;"></div>
                                                     </div>
                                                 {% elif 'SELL' in stock.recommendation %}
                                                     <div class="strength-indicator">
-                                                        <div class="strength-indicator-bar-sell" style="width: {{ stock.signal_strength*10 }}%;"></div>
+                                                        <div class="strength-indicator-bar-sell" style="width: {{ (stock.signal_strength|default(0))*10 }}%;"></div>
                                                     </div>
                                                 {% else %}
                                                     <div class="strength-indicator">
-                                                        <div class="strength-indicator-bar-neutral" style="width: {{ stock.signal_strength*10 }}%;"></div>
+                                                        <div class="strength-indicator-bar-neutral" style="width: {{ (stock.signal_strength|default(0))*10 }}%;"></div>
                                                     </div>
                                                 {% endif %}
-                                                <span class="ms-1">{{ stock.signal_strength }}</span>
+                                                <span class="ms-1">{{ stock.signal_strength|default(0) }}</span>
                                             </td>
-                                            <td>{{ "%.2f"|format(stock.target_price) }}</td>
+                                            <td>{{ "%.2f"|format(stock.target_price|default(0)) }}</td>
                                             <td class="{% if stock.daily_rsi < 30 %}oversold{% elif stock.daily_rsi > 70 %}overbought{% endif %}">
-                                                {{ stock.daily_rsi }}
+                                                {{ stock.daily_rsi|default('N/A') }}
                                             </td>
-                                            <!-- Completion of templates/index.html -->
-                            <td class="{% if stock.daily_rsi < 30 %}oversold{% elif stock.daily_rsi > 70 %}overbought{% endif %}">
-                                {{ stock.daily_rsi }}
-                            </td>
-                            <td class="{% if stock.weekly_rsi < 30 %}oversold{% elif stock.weekly_rsi > 70 %}overbought{% endif %}">
-                                {{ stock.weekly_rsi }}
-                            </td>
-                            <td class="{% if stock.monthly_rsi < 30 %}oversold{% elif stock.monthly_rsi > 70 %}overbought{% endif %}">
-                                {{ stock.monthly_rsi }}
-                            </td>
-                            <td class="{% if stock.daily_adx > 25 %}high-adx{% endif %}">
-                                {{ stock.daily_adx }}
-                            </td>
-                            <td class="{% if stock.weekly_adx > 25 %}high-adx{% endif %}">
-                                {{ stock.weekly_adx }}
-                            </td>
-                            <td class="{% if stock.monthly_adx > 25 %}high-adx{% endif %}">
-                                {{ stock.monthly_adx }}
-                            </td>
-                        </tr>
-                    {% endfor %}
-                </tbody>
-            </table>
+                                            <td class="{% if stock.weekly_rsi < 30 %}oversold{% elif stock.weekly_rsi > 70 %}overbought{% endif %}">
+                                                {{ stock.weekly_rsi|default('N/A') }}
+                                            </td>
+                                            <td class="{% if stock.monthly_rsi < 30 %}oversold{% elif stock.monthly_rsi > 70 %}overbought{% endif %}">
+                                                {{ stock.monthly_rsi|default('N/A') }}
+                                            </td>
+                                            <td class="{% if stock.daily_adx > 25 %}high-adx{% endif %}">
+                                                {{ stock.daily_adx|default('N/A') }}
+                                            </td>
+                                            <td class="{% if stock.weekly_adx > 25 %}high-adx{% endif %}">
+                                                {{ stock.weekly_adx|default('N/A') }}
+                                            </td>
+                                            <td class="{% if stock.monthly_adx > 25 %}high-adx{% endif %}">
+                                                {{ stock.monthly_adx|default('N/A') }}
+                                            </td>
+                                        </tr>
+                                    {% endfor %}
+                                </tbody>
+                            </table>
+                        </div>
+                    </div>
+                {% else %}
+                    <div class="alert alert-warning">
+                        No stock data available. Please make sure the CSV file is populated.
+                    </div>
+                {% endif %}
+
+                <div class="legend">
+                    <div class="legend-item">
+                        <div class="legend-color" style="background-color: rgba(0, 128, 0, 0.1);"></div>
+                        <span>Oversold (RSI < 30)</span>
+                    </div>
+                    <div class="legend-item">
+                        <div class="legend-color" style="background-color: rgba(255, 0, 0, 0.1);"></div>
+                        <span>Overbought (RSI > 70)</span>
+                    </div>
+                    <div class="legend-item">
+                        <div class="legend-color" style="background-color: rgba(0, 0, 255, 0.1);"></div>
+                        <span>Strong Trend (ADX > 25)</span>
+                    </div>
+                </div>
+            </div>
+
+            <!-- Buy Recommendations Tab -->
+            <div class="tab-pane fade" id="pills-buy" role="tabpanel" aria-labelledby="pills-buy-tab">
+                <div class="search-container">
+                    <input type="text" id="searchBuyRecs" class="form-control" placeholder="Search by symbol...">
+                </div>
+
+                {% if buy_recommendations %}
+                    <div class="scrollable-table">
+                        <div class="table-responsive">
+                            <table class="table table-striped table-hover table-sm" id="buyRecsTable">
+                                <thead>
+                                    <tr>
+                                        <th rowspan="2">Symbol</th>
+                                        <th rowspan="2">CMP (₹)</th>
+                                        <th rowspan="2">Change (%)</th>
+                                        <th rowspan="2">Recommendation</th>
+                                        <th rowspan="2">Signal</th>
+                                        <th rowspan="2">Target (₹)</th>
+                                        <th colspan="3" class="timeframe-header">RSI</th>
+                                        <th colspan="3" class="timeframe-header">ADX</th>
+                                    </tr>
+                                    <tr class="sub-header">
+                                        <th>Daily</th>
+                                        <th>Weekly</th>
+                                        <th>Monthly</th>
+                                        <th>Daily</th>
+                                        <th>Weekly</th>
+                                        <th>Monthly</th>
+                                    </tr>
+                                </thead>
+                                <tbody>
+                                    {% for stock in buy_recommendations %}
+                                        <tr>
+                                            <td>{{ stock.symbol }}</td>
+                                            <td>{{ "%.2f"|format(stock.close|default(0)) }}</td>
+                                            <td class="{% if stock.change_percent > 0 %}up{% elif stock.change_percent < 0 %}down{% else %}neutral{% endif %}">
+                                                {{ "%.2f"|format(stock.change_percent|default(0)) }}%
+                                            </td>
+                                            <td>
+                                                {% if stock.recommendation == 'STRONG BUY' %}
+                                                    <span class="recommendation-badge strong-buy-badge">STRONG BUY</span>
+                                                {% elif stock.recommendation == 'BUY' %}
+                                                    <span class="recommendation-badge buy-badge">BUY</span>
+                                                {% endif %}
+                                            </td>
+                                            <td>
+                                                <div class="strength-indicator">
+                                                    <div class="strength-indicator-bar-buy" style="width: {{ (stock.signal_strength|default(0))*10 }}%;"></div>
+                                                </div>
+                                                <span class="ms-1">{{ stock.signal_strength|default(0) }}</span>
+                                            </td>
+                                            <td>{{ "%.2f"|format(stock.target_price|default(0)) }}</td>
+                                            <td class="{% if stock.daily_rsi < 30 %}oversold{% elif stock.daily_rsi > 70 %}overbought{% endif %}">
+                                                {{ stock.daily_rsi|default('N/A') }}
+                                            </td>
+                                            <td class="{% if stock.weekly_rsi < 30 %}oversold{% elif stock.weekly_rsi > 70 %}overbought{% endif %}">
+                                                {{ stock.weekly_rsi|default('N/A') }}
+                                            </td>
+                                            <td class="{% if stock.monthly_rsi < 30 %}oversold{% elif stock.monthly_rsi > 70 %}overbought{% endif %}">
+                                                {{ stock.monthly_rsi|default('N/A') }}
+                                            </td>
+                                            <td class="{% if stock.daily_adx > 25 %}high-adx{% endif %}">
+                                                {{ stock.daily_adx|default('N/A') }}
+                                            </td>
+                                            <td class="{% if stock.weekly_adx > 25 %}high-adx{% endif %}">
+                                                {{ stock.weekly_adx|default('N/A') }}
+                                            </td>
+                                            <td class="{% if stock.monthly_adx > 25 %}high-adx{% endif %}">
+                                                {{ stock.monthly_adx|default('N/A') }}
+                                            </td>
+                                        </tr>
+                                    {% endfor %}
+                                </tbody>
+                            </table>
+                        </div>
+                    </div>
+                {% else %}
+                    <div class="alert alert-info">
+                        No buy recommendations available at this time.
+                    </div>
+                {% endif %}
+            </div>
+
+            <!-- Sell Recommendations Tab -->
+            <div class="tab-pane fade" id="pills-sell" role="tabpanel" aria-labelledby="pills-sell-tab">
+                <div class="search-container">
+                    <input type="text" id="searchSellRecs" class="form-control" placeholder="Search by symbol...">
+                </div>
+
+                {% if sell_recommendations %}
+                    <div class="scrollable-table">
+                        <div class="table-responsive">
+                            <table class="table table-striped table-hover table-sm" id="sellRecsTable">
+                                <thead>
+                                    <tr>
+                                        <th rowspan="2">Symbol</th>
+                                        <th rowspan="2">CMP (₹)</th>
+                                        <th rowspan="2">Change (%)</th>
+                                        <th rowspan="2">Recommendation</th>
+                                        <th rowspan="2">Signal</th>
+                                        <th rowspan="2">Target (₹)</th>
+                                        <th colspan="3" class="timeframe-header">RSI</th>
+                                        <th colspan="3" class="timeframe-header">ADX</th>
+                                    </tr>
+                                    <tr class="sub-header">
+                                        <th>Daily</th>
+                                        <th>Weekly</th>
+                                        <th>Monthly</th>
+                                        <th>Daily</th>
+                                        <th>Weekly</th>
+                                        <th>Monthly</th>
+                                    </tr>
+                                </thead>
+                                <tbody>
+                                    {% for stock in sell_recommendations %}
+                                        <tr>
+                                            <td>{{ stock.symbol }}</td>
+                                            <td>{{ "%.2f"|format(stock.close|default(0)) }}</td>
+                                            <td class="{% if stock.change_percent > 0 %}up{% elif stock.change_percent < 0 %}down{% else %}neutral{% endif %}">
+                                                {{ "%.2f"|format(stock.change_percent|default(0)) }}%
+                                            </td>
+                                            <td>
+                                                {% if stock.recommendation == 'STRONG SELL' %}
+                                                    <span class="recommendation-badge strong-sell-badge">STRONG SELL</span>
+                                                {% elif stock.recommendation == 'SELL' %}
+                                                    <span class="recommendation-badge sell-badge">SELL</span>
+                                                {% endif %}
+                                            </td>
+                                            <td>
+                                                <div class="strength-indicator">
+                                                    <div class="strength-indicator-bar-sell" style="width: {{ (stock.signal_strength|default(0))*10 }}%;"></div>
+                                                </div>
+                                                <span class="ms-1">{{ stock.signal_strength|default(0) }}</span>
+                                            </td>
+                                            <td>{{ "%.2f"|format(stock.target_price|default(0)) }}</td>
+                                            <td class="{% if stock.daily_rsi < 30 %}oversold{% elif stock.daily_rsi > 70 %}overbought{% endif %}">
+                                                {{ stock.daily_rsi|default('N/A') }}
+                                            </td>
+                                            <td class="{% if stock.weekly_rsi < 30 %}oversold{% elif stock.weekly_rsi > 70 %}overbought{% endif %}">
+                                                {{ stock.weekly_rsi|default('N/A') }}
+                                            </td>
+                                            <td class="{% if stock.monthly_rsi < 30 %}oversold{% elif stock.monthly_rsi > 70 %}overbought{% endif %}">
+                                                {{ stock.monthly_rsi|default('N/A') }}
+                                            </td>
+                                            <td class="{% if stock.daily_adx > 25 %}high-adx{% endif %}">
+                                                {{ stock.daily_adx|default('N/A') }}
+                                            </td>
+                                            <td class="{% if stock.weekly_adx > 25 %}high-adx{% endif %}">
+                                                {{ stock.weekly_adx|default('N/A') }}
+                                            </td>
+                                            <td class="{% if stock.monthly_adx > 25 %}high-adx{% endif %}">
+                                                {{ stock.monthly_adx|default('N/A') }}
+                                            </td>
+                                        </tr>
+                                    {% endfor %}
+                                </tbody>
+                            </table>
+                        </div>
+                    </div>
+                {% else %}
+                    <div class="alert alert-info">
+                        No sell recommendations available at this time.
+                    </div>
+                {% endif %}
+            </div>
         </div>
-    </div>
-{% else %}
-    <div class="alert alert-warning">
-        No stock data available. Please make sure the CSV file is populated.
-    </div>
-{% endif %}
 
-<div class="legend">
-    <div class="legend-item">
-        <div class="legend-color" style="background-color: rgba(0, 128, 0, 0.1);"></div>
-        <span>Oversold (RSI < 30)</span>
-    </div>
-    <div class="legend-item">
-        <div class="legend-color" style="background-color: rgba(255, 0, 0, 0.1);"></div>
-        <span>Overbought (RSI > 70)</span>
-    </div>
-    <div class="legend-item">
-        <div class="legend-color" style="background-color: rgba(0, 0, 255, 0.1);"></div>
-        <span>Strong Trend (ADX > 25)</span>
-    </div>
-</div>
-</div>
+        <footer class="text-center mt-4">
+            <p class="text-muted">
+                &copy; 2025 Stock Analysis Bot. This analysis is for informational purposes only. Not financial advice.
+            </p>
+        </footer>
 
-<!-- Buy Recommendations Tab -->
-<div class="tab-pane fade" id="pills-buy" role="tabpanel" aria-labelledby="pills-buy-tab">
-<div class="search-container">
-    <input type="text" id="searchBuyRecs" class="form-control" placeholder="Search by symbol...">
-</div>
-
-{% if buy_recommendations %}
-    <div class="scrollable-table">
-        <div class="table-responsive">
-            <table class="table table-striped table-hover table-sm" id="buyRecsTable">
-                <thead>
-                    <tr>
-                        <th rowspan="2">Symbol</th>
-                        <th rowspan="2">CMP (₹)</th>
-                        <th rowspan="2">Change (%)</th>
-                        <th rowspan="2">Recommendation</th>
-                        <th rowspan="2">Signal</th>
-                        <th rowspan="2">Target (₹)</th>
-                        <th colspan="3" class="timeframe-header">RSI</th>
-                        <th colspan="3" class="timeframe-header">ADX</th>
-                    </tr>
-                    <tr class="sub-header">
-                        <th>Daily</th>
-                        <th>Weekly</th>
-                        <th>Monthly</th>
-                        <th>Daily</th>
-                        <th>Weekly</th>
-                        <th>Monthly</th>
-                    </tr>
-                </thead>
-                <tbody>
-                    {% for stock in buy_recommendations %}
-                        <tr>
-                            <td>{{ stock.symbol }}</td>
-                            <td>{{ "%.2f"|format(stock.close) }}</td>
-                            <td class="{% if stock.change_percent > 0 %}up{% elif stock.change_percent < 0 %}down{% else %}neutral{% endif %}">
-                                {{ "%.2f"|format(stock.change_percent) }}%
-                            </td>
-                            <td>
-                                {% if stock.recommendation == 'STRONG BUY' %}
-                                    <span class="recommendation-badge strong-buy-badge">STRONG BUY</span>
-                                {% elif stock.recommendation == 'BUY' %}
-                                    <span class="recommendation-badge buy-badge">BUY</span>
-                                {% endif %}
-                            </td>
-                            <td>
-                                <div class="strength-indicator">
-                                    <div class="strength-indicator-bar-buy" style="width: {{ stock.signal_strength*10 }}%;"></div>
-                                </div>
-                                <span class="ms-1">{{ stock.signal_strength }}</span>
-                            </td>
-                            <td>{{ "%.2f"|format(stock.target_price) }}</td>
-                            <td class="{% if stock.daily_rsi < 30 %}oversold{% elif stock.daily_rsi > 70 %}overbought{% endif %}">
-                                {{ stock.daily_rsi }}
-                            </td>
-                            <td class="{% if stock.weekly_rsi < 30 %}oversold{% elif stock.weekly_rsi > 70 %}overbought{% endif %}">
-                                {{ stock.weekly_rsi }}
-                            </td>
-                            <td class="{% if stock.monthly_rsi < 30 %}oversold{% elif stock.monthly_rsi > 70 %}overbought{% endif %}">
-                                {{ stock.monthly_rsi }}
-                            </td>
-                            <td class="{% if stock.daily_adx > 25 %}high-adx{% endif %}">
-                                {{ stock.daily_adx }}
-                            </td>
-                            <td class="{% if stock.weekly_adx > 25 %}high-adx{% endif %}">
-                                {{ stock.weekly_adx }}
-                            </td>
-                            <td class="{% if stock.monthly_adx > 25 %}high-adx{% endif %}">
-                                {{ stock.monthly_adx }}
-                            </td>
-                        </tr>
-                    {% endfor %}
-                </tbody>
-            </table>
-        </div>
     </div>
-{% else %}
-    <div class="alert alert-info">
-        No buy recommendations available at this time.
-    </div>
-{% endif %}
-</div>
 
-<!-- Sell Recommendations Tab -->
-<div class="tab-pane fade" id="pills-sell" role="tabpanel" aria-labelledby="pills-sell-tab">
-<div class="search-container">
-    <input type="text" id="searchSellRecs" class="form-control" placeholder="Search by symbol...">
-</div>
-
-{% if sell_recommendations %}
-    <div class="scrollable-table">
-        <div class="table-responsive">
-            <table class="table table-striped table-hover table-sm" id="sellRecsTable">
-                <thead>
-                    <tr>
-                        <th rowspan="2">Symbol</th>
-                        <th rowspan="2">CMP (₹)</th>
-                        <th rowspan="2">Change (%)</th>
-                        <th rowspan="2">Recommendation</th>
-                        <th rowspan="2">Signal</th>
-                        <th rowspan="2">Target (₹)</th>
-                        <th colspan="3" class="timeframe-header">RSI</th>
-                        <th colspan="3" class="timeframe-header">ADX</th>
-                    </tr>
-                    <tr class="sub-header">
-                        <th>Daily</th>
-                        <th>Weekly</th>
-                        <th>Monthly</th>
-                        <th>Daily</th>
-                        <th>Weekly</th>
-                        <th>Monthly</th>
-                    </tr>
-                </thead>
-                <tbody>
-                    {% for stock in sell_recommendations %}
-                        <tr>
-                            <td>{{ stock.symbol }}</td>
-                            <td>{{ "%.2f"|format(stock.close) }}</td>
-                            <td class="{% if stock.change_percent > 0 %}up{% elif stock.change_percent < 0 %}down{% else %}neutral{% endif %}">
-                                {{ "%.2f"|format(stock.change_percent) }}%
-                            </td>
-                            <td>
-                                {% if stock.recommendation == 'STRONG SELL' %}
-                                    <span class="recommendation-badge strong-sell-badge">STRONG SELL</span>
-                                {% elif stock.recommendation == 'SELL' %}
-                                    <span class="recommendation-badge sell-badge">SELL</span>
-                                {% endif %}
-                            </td>
-                            <td>
-                                <div class="strength-indicator">
-                                    <div class="strength-indicator-bar-sell" style="width: {{ stock.signal_strength*10 }}%;"></div>
-                                </div>
-                                <span class="ms-1">{{ stock.signal_strength }}</span>
-                            </td>
-                            <td>{{ "%.2f"|format(stock.target_price) }}</td>
-                            <td class="{% if stock.daily_rsi < 30 %}oversold{% elif stock.daily_rsi > 70 %}overbought{% endif %}">
-                                {{ stock.daily_rsi }}
-                            </td>
-                            <td class="{% if stock.weekly_rsi < 30 %}oversold{% elif stock.weekly_rsi > 70 %}overbought{% endif %}">
-                                {{ stock.weekly_rsi }}
-                            </td>
-                            <td class="{% if stock.monthly_rsi < 30 %}oversold{% elif stock.monthly_rsi > 70 %}overbought{% endif %}">
-                                {{ stock.monthly_rsi }}
-                            </td>
-                            <td class="{% if stock.daily_adx > 25 %}high-adx{% endif %}">
-                                {{ stock.daily_adx }}
-                            </td>
-                            <td class="{% if stock.weekly_adx > 25 %}high-adx{% endif %}">
-                                {{ stock.weekly_adx }}
-                            </td>
-                            <td class="{% if stock.monthly_adx > 25 %}high-adx{% endif %}">
-                                {{ stock.monthly_adx }}
-                            </td>
-                        </tr>
-                    {% endfor %}
-                </tbody>
-            </table>
-        </div>
-    </div>
-{% else %}
-    <div class="alert alert-info">
-        No sell recommendations available at this time.
-    </div>
-{% endif %}
-</div>
-</div>
-
-<footer class="text-center mt-4">
-<p class="text-muted">
-    &copy; 2025 Stock Analysis Bot. This analysis is for informational purposes only. Not financial advice.
-</p>
-</footer>
-
-</div>
-
-<script src="https://cdn.jsdelivr.net/npm/bootstrap@5.3.0/dist/js/bootstrap.bundle.min.js"></script>
-<script>
-document.addEventListener('DOMContentLoaded', function() {
-    // Refresh button
-    document.getElementById('refreshBtn').addEventListener('click', function() {
-        location.reload();
-    });
-    
-    // Search functionality for All Stocks table
-    document.getElementById('searchAllStocks').addEventListener('input', function() {
-        filterTable('allStocksTable', this.value);
-    });
-    
-    // Search functionality for Buy Recommendations table
-    document.getElementById('searchBuyRecs').addEventListener('input', function() {
-        filterTable('buyRecsTable', this.value);
-    });
-    
-    // Search functionality for Sell Recommendations table
-    document.getElementById('searchSellRecs').addEventListener('input', function() {
-        filterTable('sellRecsTable', this.value);
-    });
-    
-    function filterTable(tableId, query) {
-        query = query.toLowerCase();
-        const table = document.getElementById(tableId);
-        if (!table) return;
-        
-        const rows = table.getElementsByTagName('tbody')[0].getElementsByTagName('tr');
-        
-        for (let i = 0; i < rows.length; i++) {
-            const symbol = rows[i].getElementsByTagName('td')[0].textContent.toLowerCase();
-            if (symbol.includes(query)) {
-                rows[i].style.display = '';
-            } else {
-                rows[i].style.display = 'none';
+    <script src="https://cdn.jsdelivr.net/npm/bootstrap@5.3.0/dist/js/bootstrap.bundle.min.js"></script>
+    <script>
+        document.addEventListener('DOMContentLoaded', function() {
+            // Refresh button
+            document.getElementById('refreshBtn').addEventListener('click', function() {
+                location.reload();
+            });
+            
+            // Search functionality for All Stocks table
+            document.getElementById('searchAllStocks').addEventListener('input', function() {
+                filterTable('allStocksTable', this.value);
+            });
+            
+            // Search functionality for Buy Recommendations table
+            document.getElementById('searchBuyRecs').addEventListener('input', function() {
+                filterTable('buyRecsTable', this.value);
+            });
+            
+            // Search functionality for Sell Recommendations table
+            document.getElementById('searchSellRecs').addEventListener('input', function() {
+                filterTable('sellRecsTable', this.value);
+            });
+            
+            function filterTable(tableId, query) {
+                query = query.toLowerCase();
+                const table = document.getElementById(tableId);
+                if (!table) return;
+                
+                const rows = table.getElementsByTagName('tbody')[0].getElementsByTagName('tr');
+                
+                for (let i = 0; i < rows.length; i++) {
+                    const symbol = rows[i].getElementsByTagName('td')[0].textContent.toLowerCase();
+                    if (symbol.includes(query)) {
+                        rows[i].style.display = '';
+                    } else {
+                        rows[i].style.display = 'none';
+                    }
+                }
             }
-        }
-    }
-});
-</script>
+        });
+    </script>
 </body>
 </html>
 '''
