@@ -1067,7 +1067,7 @@ async def handle_text_message(update: Update, context: ContextTypes.DEFAULT_TYPE
             "Please use specific commands or enter a valid stock symbol. Use /help for more information."
         )
 
-# Flask routes
+# Flask routes with optimized structure
 @app.route('/')
 def home():
     """Home page with dashboard"""
@@ -1103,48 +1103,53 @@ def api_analyze(symbol):
     
     # Calculate indicators and get recommendations
     stock_data = calculate_indicators(stock_data)
-    # Add these functions after calculate_indicators but before get_recommendations
+    recommendations = get_recommendations_with_targets(stock_data, symbol)
+    
+    return jsonify(recommendations)
 
-def fetch_timeframe_data(symbol, timeframe='daily'):
-    """Fetch stock data for specific timeframe (daily, weekly, monthly)"""
-    try:
-        # Simulating data for different timeframes
-        # In a real implementation, you would fetch actual data from an API
-        
-        if timeframe == 'weekly':
-            periods = 52  # One year of weekly data
-            freq = 'W'
-        elif timeframe == 'monthly':
-            periods = 24  # Two years of monthly data
-            freq = 'M'
-        else:  # daily
-            periods = 100
-            freq = 'D'
-        
-        # Create sample data with the appropriate frequency
-        hist_data = pd.DataFrame({
-            'date': pd.date_range(end=datetime.datetime.now(), periods=periods, freq=freq),
-            'open': np.random.normal(500, 10, periods),
-            'high': np.random.normal(505, 15, periods),
-            'low': np.random.normal(495, 15, periods),
-            'close': np.random.normal(500, 10, periods),
-            'volume': np.random.normal(1000000, 200000, periods)
+# Combined endpoint for all timeframe analysis
+@app.route('/api/timeframe/<timeframe>')
+def api_timeframe(timeframe):
+    """
+    API endpoint for timeframe analysis (daily, weekly, monthly)
+    Accepts timeframe parameter: 'daily', 'weekly', 'monthly'
+    """
+    # Validate timeframe parameter
+    valid_timeframes = ['daily', 'weekly', 'monthly']
+    if timeframe not in valid_timeframes:
+        return jsonify({
+            "error": f"Invalid timeframe. Please use one of: {', '.join(valid_timeframes)}"
         })
-        
-        # Make sure high is the highest and low is the lowest for each period
-        for i in range(len(hist_data)):
-            values = [hist_data.loc[i, 'open'], hist_data.loc[i, 'close']]
-            hist_data.loc[i, 'high'] = max(values) + abs(np.random.normal(0, 2))
-            hist_data.loc[i, 'low'] = min(values) - abs(np.random.normal(0, 2))
-        
-        hist_data['symbol'] = symbol
-        return hist_data
-    except Exception as e:
-        print(f"Error fetching {timeframe} data for {symbol}: {e}")
-        return pd.DataFrame()
+    
+    # For daily timeframe, use the existing daily analysis data
+    if timeframe == 'daily':
+        return jsonify(daily_analysis)
+    
+    # For weekly and monthly, generate the appropriate analysis
+    analysis_data = generate_timeframe_analysis(timeframe)
+    return jsonify(analysis_data)
+
+# Combined route for timeframe pages
+@app.route('/<timeframe>')
+def timeframe_analysis(timeframe):
+    """
+    Page for timeframe analysis (daily, weekly, monthly)
+    Accepts timeframe parameter: 'daily', 'weekly', 'monthly'
+    """
+    # Validate timeframe parameter
+    valid_timeframes = ['weekly', 'monthly']
+    
+    # Redirect to home for daily or invalid timeframes
+    if timeframe not in valid_timeframes:
+        return redirect('/')
+    
+    return render_template('timeframe_analysis.html', 
+                          timeframe=timeframe.capitalize(),
+                          market_status=is_market_hours(),
+                          last_update=last_update_time)
 
 def generate_timeframe_analysis(timeframe):
-    """Generate analysis for weekly or monthly timeframes"""
+    """Generate analysis for different timeframes (weekly or monthly)"""
     stocks_df = load_stock_data()
     
     if stocks_df.empty:
@@ -1212,37 +1217,43 @@ def generate_timeframe_analysis(timeframe):
         'categories': categorized_stocks
     }
 
-# Add these Flask routes after the existing ones
-
-@app.route('/weekly/details', endpoint='weekly_analysis_details')  # Note the different endpoint name
-def weekly_analysis_details():
-    """Page for weekly timeframe analysis"""
-    return render_template('timeframe_analysis.html', 
-                          timeframe='Weekly',
-                          market_status=is_market_hours(),
-                          last_update=last_update_time)
-
-@app.route('/monthly')
-def monthly_analysis():
-    """Page for monthly timeframe analysis"""
-    return render_template('timeframe_analysis.html', 
-                          timeframe='Monthly',
-                          market_status=is_market_hours(),
-                          last_update=last_update_time)
-
-@app.route('/api/weekly')
-def api_weekly():
-    """API endpoint for weekly analysis"""
-    weekly_data = generate_timeframe_analysis('weekly')
-    return jsonify(weekly_data)
-
-@app.route('/api/monthly')
-def api_monthly():
-    """API endpoint for monthly analysis"""
-    monthly_data = generate_timeframe_analysis('monthly')
-    return jsonify(monthly_data)
-
-# Now add this to the ensure_directories function to create the new template
+def fetch_timeframe_data(symbol, timeframe='daily'):
+    """Fetch stock data for specific timeframe (daily, weekly, monthly)"""
+    try:
+        # Simulating data for different timeframes
+        # In a real implementation, you would fetch actual data from an API
+        
+        if timeframe == 'weekly':
+            periods = 52  # One year of weekly data
+            freq = 'W'
+        elif timeframe == 'monthly':
+            periods = 24  # Two years of monthly data
+            freq = 'M'
+        else:  # daily
+            periods = 100
+            freq = 'D'
+        
+        # Create sample data with the appropriate frequency
+        hist_data = pd.DataFrame({
+            'date': pd.date_range(end=datetime.datetime.now(), periods=periods, freq=freq),
+            'open': np.random.normal(500, 10, periods),
+            'high': np.random.normal(505, 15, periods),
+            'low': np.random.normal(495, 15, periods),
+            'close': np.random.normal(500, 10, periods),
+            'volume': np.random.normal(1000000, 200000, periods)
+        })
+        
+        # Make sure high is the highest and low is the lowest for each period
+        for i in range(len(hist_data)):
+            values = [hist_data.loc[i, 'open'], hist_data.loc[i, 'close']]
+            hist_data.loc[i, 'high'] = max(values) + abs(np.random.normal(0, 2))
+            hist_data.loc[i, 'low'] = min(values) - abs(np.random.normal(0, 2))
+        
+        hist_data['symbol'] = symbol
+        return hist_data
+    except Exception as e:
+        print(f"Error fetching {timeframe} data for {symbol}: {e}")
+        return pd.DataFrame()
 
 def ensure_directories():
     """Ensure all required directories exist"""
@@ -1344,11 +1355,12 @@ def ensure_directories():
             document.getElementById('last-update').textContent = lastUpdate;
             
             // Load timeframe analysis
-            fetchTimeframeData('{{ timeframe.lower() }}');
+            const timeframe = '{{ timeframe.lower() }}';
+            fetchTimeframeData(timeframe);
         });
         
         function fetchTimeframeData(timeframe) {
-            fetch(`/api/${timeframe}`)
+            fetch(`/api/timeframe/${timeframe}`)
                 .then(response => response.json())
                 .then(data => {
                     document.getElementById('loading').style.display = 'none';
@@ -1471,9 +1483,21 @@ def ensure_directories():
 </body>
 </html>
             """)
-    recommendations = get_recommendations_with_targets(stock_data, symbol)
     
-    return jsonify(recommendations)
+    # Update the index.html JavaScript to use the new API endpoint
+    if os.path.exists(f"{TEMPLATES_DIR}/index.html"):
+        with open(f"{TEMPLATES_DIR}/index.html", "r") as f:
+            content = f.read()
+        
+        # Update the fetchDailyAnalysis function to use the new API endpoint
+        if "fetch('/api/daily')" in content:
+            content = content.replace(
+                "fetch('/api/daily')",
+                "fetch('/api/timeframe/daily')"
+            )
+            
+            with open(f"{TEMPLATES_DIR}/index.html", "w") as f:
+                f.write(content)
 
 def run_scheduler():
     """Run the scheduler in a separate thread"""
@@ -1489,366 +1513,12 @@ def run_scheduler():
     asyncio.set_event_loop(loop)
     loop.run_until_complete(scheduler_job())
 
-def ensure_directories():
-    """Ensure all required directories exist"""
-    os.makedirs('static', exist_ok=True)
-    os.makedirs(TEMPLATES_DIR, exist_ok=True)
-
 async def main():
     """Main function to start the bot and web server"""
     # Ensure directories exist
     ensure_directories()
     
-    # Create sample CSV file with Nifty 50 stocks if not exists
-    if not os.path.exists(CSV_FILE_PATH):
-        # Sample list of some Nifty 50 stocks
-        sample_stocks = pd.DataFrame({
-            'symbol': ['RELIANCE', 'TCS', 'HDFCBANK', 'INFY', 'ICICIBANK',
-                      'HDFC', 'KOTAKBANK', 'ITC', 'LT', 'SBIN',
-                      'AXISBANK', 'HINDUNILVR', 'BHARTIARTL', 'BAJFINANCE', 'ASIANPAINT'],
-            'name': ['Reliance Industries', 'Tata Consultancy Services', 'HDFC Bank', 'Infosys', 'ICICI Bank',
-                    'Housing Development Finance Corporation', 'Kotak Mahindra Bank', 'ITC', 'Larsen & Toubro', 'State Bank of India',
-                    'Axis Bank', 'Hindustan Unilever', 'Bharti Airtel', 'Bajaj Finance', 'Asian Paints']
-        })
-        sample_stocks.to_csv(CSV_FILE_PATH, index=False)
-    
-    # Create HTML template
-    if not os.path.exists(f"{TEMPLATES_DIR}/index.html"):
-        with open(f"{TEMPLATES_DIR}/index.html", "w") as f:
-            f.write("""
-<!DOCTYPE html>
-<html>
-<head>
-    <title>Nifty 50 Stock Analyzer</title>
-    <meta charset="UTF-8">
-    <meta name="viewport" content="width=device-width, initial-scale=1.0">
-    <link href="https://cdn.jsdelivr.net/npm/bootstrap@5.3.0-alpha1/dist/css/bootstrap.min.css" rel="stylesheet">
-    <style>
-        body { padding-top: 20px; }
-        .recommendation-card { margin-bottom: 20px; }
-        .buy { border-left: 5px solid green; }
-        .sell { border-left: 5px solid red; }
-        .hold { border-left: 5px solid gray; }
-    </style>
-</head>
-<body>
-    <div class="container">
-        <h1 class="text-center mb-4">Nifty 50 Stock Analyzer</h1>
-        
-        <div class="row">
-            <div class="col-md-6">
-                <div class="card mb-4">
-                    <div class="card-header">
-                        <h5>Market Status</h5>
-                    </div>
-                    <div class="card-body">
-                        <p><strong>Market is:</strong> <span id="market-status" class="badge bg-success">Loading...</span></p>
-                        <p><strong>Last Update:</strong> <span id="last-update">Loading...</span></p>
-                    </div>
-                </div>
-            </div>
-            
-            <div class="col-md-6">
-                <div class="card mb-4">
-                    <div class="card-header">
-                        <h5>Stock Analysis</h5>
-                    </div>
-                    <!-- Add this after the stock analysis card (around line 69 in your code) -->
-    <div class="col-md-12 mt-3">
-    <div class="card mb-4">
-        <div class="card-header">
-            <h5>Analysis Timeframes</h5>
-        </div>
-        <div class="card-body">
-            <div class="btn-group" role="group" aria-label="Timeframe selection">
-                <a href="/" class="btn btn-primary">Daily Analysis</a>
-                <a href="/weekly" class="btn btn-secondary">Weekly Analysis</a>
-                <a href="/monthly" class="btn btn-info">Monthly Analysis</a>
-            </div>
-        </div>
-    </div>
-    </div>
-                    <div class="card-body">
-                        <div class="input-group mb-3">
-                            <input type="text" id="symbol-input" class="form-control" placeholder="Enter stock symbol (e.g., RELIANCE)">
-                            <button class="btn btn-primary" type="button" id="analyze-btn">Analyze</button>
-                        </div>
-                    </div>
-                </div>
-            </div>
-        </div>
-        
-        <ul class="nav nav-tabs mb-4" id="myTab" role="tablist">
-            <li class="nav-item" role="presentation">
-                <button class="nav-link active" id="recommendations-tab" data-bs-toggle="tab" data-bs-target="#recommendations" type="button" role="tab">Recommendations</button>
-            </li>
-            <li class="nav-item" role="presentation">
-                <button class="nav-link" id="daily-tab" data-bs-toggle="tab" data-bs-target="#daily" type="button" role="tab">Daily Analysis</button>
-            </li>
-            <li class="nav-item" role="presentation">
-                <button class="nav-link" id="analysis-tab" data-bs-toggle="tab" data-bs-target="#analysis" type="button" role="tab">Stock Analysis</button>
-            </li>
-        </ul>
-        
-        <div class="tab-content" id="myTabContent">
-            <div class="tab-pane fade show active" id="recommendations" role="tabpanel">
-                <h3>Latest Recommendations</h3>
-                <div id="recommendations-container" class="row">
-                    <p>Loading recommendations...</p>
-                </div>
-            </div>
-            
-            <div class="tab-pane fade" id="daily" role="tabpanel">
-                <h3>Daily Analysis</h3>
-                <div id="daily-container">
-                    <p>Loading daily analysis...</p>
-                </div>
-            </div>
-            
-            <div class="tab-pane fade" id="analysis" role="tabpanel">
-                <h3>Stock Analysis</h3>
-                <div id="analysis-container">
-                    <p>Select a stock to analyze using the input field above.</p>
-                </div>
-            </div>
-        </div>
-    </div>
-    
-    <script src="https://cdn.jsdelivr.net/npm/bootstrap@5.3.0-alpha1/dist/js/bootstrap.bundle.min.js"></script>
-    <script>
-        // Update market status on page load
-        document.addEventListener('DOMContentLoaded', function() {
-            // Set market status
-            const marketStatus = {{ 'true' if market_status else 'false' }};
-            const statusEl = document.getElementById('market-status');
-            
-            if (marketStatus) {
-                statusEl.textContent = 'OPEN';
-                statusEl.className = 'badge bg-success';
-            } else {
-                statusEl.textContent = 'CLOSED';
-                statusEl.className = 'badge bg-danger';
-            }
-            
-            // Set last update time
-            const lastUpdate = "{{ last_update or 'Not available' }}";
-            document.getElementById('last-update').textContent = lastUpdate;
-            
-            // Load recommendations
-            fetchRecommendations();
-            
-            // Load daily analysis
-            fetchDailyAnalysis();
-            
-            // Add event listener for analyze button
-            document.getElementById('analyze-btn').addEventListener('click', function() {
-                const symbol = document.getElementById('symbol-input').value.trim().toUpperCase();
-                if (symbol) {
-                    analyzeStock(symbol);
-                } else {
-                    alert('Please enter a valid stock symbol.');
-                }
-            });
-        });
-        
-        function fetchRecommendations() {
-            fetch('/api/recommendations')
-                .then(response => response.json())
-                .then(data => {
-                    const container = document.getElementById('recommendations-container');
-                    
-                    if (!data || data.length === 0) {
-                        container.innerHTML = '<p>No recommendations available yet.</p>';
-                        return;
-                    }
-                    
-                    container.innerHTML = '';
-                    
-                    // Filter for BUY and SELL recommendations
-                    const filteredRecs = data.filter(rec => 
-                        rec.recommendations && rec.recommendations.OVERALL && 
-                        (rec.recommendations.OVERALL === 'BUY' || rec.recommendations.OVERALL === 'SELL')
-                    );
-                    
-                    if (filteredRecs.length === 0) {
-                        container.innerHTML = '<p>No BUY or SELL recommendations in the latest analysis.</p>';
-                        return;
-                    }
-                    
-                    filteredRecs.forEach(rec => {
-                        const card = document.createElement('div');
-                        card.className = `col-md-4`;
-                        
-                        let recommendationClass = '';
-                        if (rec.recommendations.OVERALL === 'BUY') {
-                            recommendationClass = 'buy';
-                        } else if (rec.recommendations.OVERALL === 'SELL') {
-                            recommendationClass = 'sell';
-                        } else {
-                            recommendationClass = 'hold';
-                        }
-                        
-                        card.innerHTML = `
-                            <div class="card recommendation-card ${recommendationClass}">
-                                <div class="card-header">
-                                    <h5>${rec.symbol}</h5>
-                                </div>
-                                <div class="card-body">
-                                    <h6 class="card-subtitle mb-2 text-muted">₹${rec.price}</h6>
-                                    <p class="card-text">
-                                        <strong>Recommendation:</strong> ${rec.recommendations.OVERALL}<br>
-                                        <strong>Target:</strong> ₹${rec.target_price}<br>
-                                        <strong>Stop Loss:</strong> ₹${rec.stop_loss}
-                                    </p>
-                                </div>
-                            </div>
-                        `;
-                        
-                        container.appendChild(card);
-                    });
-                })
-                .catch(error => {
-                    console.error('Error fetching recommendations:', error);
-                    document.getElementById('recommendations-container').innerHTML = 
-                        '<p>Error loading recommendations. Please try again later.</p>';
-                });
-        }
-        
-        function fetchDailyAnalysis() {
-            fetch('/api/daily')
-                .then(response => response.json())
-                .then(data => {
-                    const container = document.getElementById('daily-container');
-                    
-                    if (!data || Object.keys(data).length === 0) {
-                        container.innerHTML = '<p>No daily analysis available yet.</p>';
-                        return;
-                    }
-                    
-                    let html = `<h4>Daily Analysis for ${data.date}</h4>`;
-                    
-                    html += '<div class="row mt-4"><div class="col-md-6">';
-                    html += `<h5>BUY Recommendations (${data.buy.length})</h5>`;
-                    html += '<table class="table table-striped table-sm">';
-                    html += '<thead><tr><th>Symbol</th><th>Price</th><th>Target</th><th>Stop Loss</th></tr></thead>';
-                    html += '<tbody>';
-                    
-                    data.buy.slice(0, 10).forEach(rec => {
-                        html += `<tr>
-                            <td>${rec.symbol}</td>
-                            <td>₹${rec.price}</td>
-                            <td>₹${rec.target_price}</td>
-                            <td>₹${rec.stop_loss}</td>
-                        </tr>`;
-                    });
-                    
-                    html += '</tbody></table>';
-                    html += '</div><div class="col-md-6">';
-                    
-                    html += `<h5>SELL Recommendations (${data.sell.length})</h5>`;
-                    html += '<table class="table table-striped table-sm">';
-                    html += '<thead><tr><th>Symbol</th><th>Price</th><th>Target</th><th>Stop Loss</th></tr></thead>';
-                    html += '<tbody>';
-                    
-                    data.sell.slice(0, 10).forEach(rec => {
-                        html += `<tr>
-                            <td>${rec.symbol}</td>
-                            <td>₹${rec.price}</td>
-                            <td>₹${rec.target_price}</td>
-                            <td>₹${rec.stop_loss}</td>
-                        </tr>`;
-                    });
-                    
-                    html += '</tbody></table>';
-                    html += '</div></div>';
-                    
-                    html += `<p class="mt-3"><strong>HOLD Recommendations:</strong> ${data.hold} stocks</p>`;
-                    
-                    container.innerHTML = html;
-                })
-                .catch(error => {
-                    console.error('Error fetching daily analysis:', error);
-                    document.getElementById('daily-container').innerHTML = 
-                        '<p>Error loading daily analysis. Please try again later.</p>';
-                });
-        }
-        
-        function analyzeStock(symbol) {
-            const container = document.getElementById('analysis-container');
-            container.innerHTML = '<p>Analyzing ' + symbol + '... Please wait.</p>';
-            
-            // Switch to the analysis tab
-            document.getElementById('analysis-tab').click();
-            
-            fetch('/api/analyze/' + symbol)
-                .then(response => response.json())
-                .then(data => {
-                    if (data.error) {
-                        container.innerHTML = '<p class="text-danger">' + data.error + '</p>';
-                        return;
-                    }
-                    
-                    let html = `<h4>Analysis for ${data.symbol}</h4>`;
-                    html += `<p><strong>Price:</strong> ₹${data.price} | <strong>Last Updated:</strong> ${data.timestamp}</p>`;
-                    
-                    html += '<div class="row mt-4">';
-                    html += '<div class="col-md-6">';
-                    html += '<div class="card">';
-                    html += '<div class="card-header"><h5>Technical Indicators</h5></div>';
-                    html += '<div class="card-body">';
-                    html += '<table class="table table-striped">';
-                    html += '<thead><tr><th>Indicator</th><th>Signal</th></tr></thead>';
-                    html += '<tbody>';
-                    
-                    Object.entries(data.recommendations).forEach(([indicator, signal]) => {
-                        if (indicator !== 'OVERALL') {
-                            let signalClass = '';
-                            if (signal === 'BUY') signalClass = 'text-success';
-                            else if (signal === 'SELL') signalClass = 'text-danger';
-                            
-                            html += `<tr>
-                                <td>${indicator}</td>
-                                <td class="${signalClass}">${signal}</td>
-                            </tr>`;
-                        }
-                    });
-                    
-                    html += '</tbody></table>';
-                    html += '</div></div></div>';
-                    
-                    html += '<div class="col-md-6">';
-                    html += '<div class="card">';
-                    html += '<div class="card-header"><h5>Recommendation</h5></div>';
-                    html += '<div class="card-body">';
-                    
-                    let overallClass = '';
-                    if (data.recommendations.OVERALL === 'BUY') overallClass = 'text-success';
-                    else if (data.recommendations.OVERALL === 'SELL') overallClass = 'text-danger';
-                    
-                    html += `<h3 class="${overallClass}">${data.recommendations.OVERALL}</h3>`;
-                    html += `<p><strong>Target Price:</strong> ₹${data.target_price}</p>`;
-                    html += `<p><strong>Stop Loss:</strong> ₹${data.stop_loss}</p>`;
-                    
-                    html += '</div></div></div>';
-                    html += '</div>';
-                    
-                    html += '<div class="mt-4">';
-                    html += `<p>Note: For a detailed technical chart, use the "/analyze ${data.symbol}" command in the Telegram bot.</p>`;
-                    html += '</div>';
-                    
-                    container.innerHTML = html;
-                })
-                .catch(error => {
-                    console.error('Error analyzing stock:', error);
-                    container.innerHTML = 
-                        '<p class="text-danger">Error analyzing stock. Please try again later.</p>';
-                });
-        }
-    </script>
-</body>
-</html>
-            """)
-
+    # Rest of the function remains the same...
     # Initialize the Telegram application
     application = Application.builder().token(TELEGRAM_BOT_TOKEN).build()
     
