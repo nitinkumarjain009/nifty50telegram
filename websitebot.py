@@ -1016,27 +1016,27 @@ def ensure_directories():
             """)
     recommendations = get_recommendations_with_targets(stock_data, symbol)
     
+# Put your code inside an async function
+async def send_analysis(update, message, recommendations, stock_data, symbol):
     # Format and send the analysis
-message = format_recommendations_message(recommendations)
-await update.message.reply_markdown(message)
-
-# Create and send chart
-try:
-    fig = create_technical_chart(stock_data, symbol)
-    if fig:
-        chart_path = f"static/{symbol}_chart.png"
-        pio.write_image(fig, chart_path)
-        
-        # Send the chart as photo
-        with open(chart_path, 'rb') as photo:
-            await update.message.reply_photo(photo=photo, caption=f"Technical chart for {symbol}")
-except Exception as e:
-    await update.message.reply_text(f"Error generating chart: {e}")
+    message = format_recommendations_message(recommendations)
+    await update.message.reply_markdown(message)
     
-async def handle_unknown_command(update: Update, context: ContextTypes.DEFAULT_TYPE):
-    await update.message.reply_text(
-        "Sorry, I didn't understand that command. Use /help to see available commands."
-    )
+    # Create and send chart
+    try:
+        fig = create_technical_chart(stock_data, symbol)
+        if fig:
+            chart_path = f"static/{symbol}_chart.png"
+            pio.write_image(fig, chart_path)
+            
+            # Send the chart as photo
+            with open(chart_path, 'rb') as photo:
+                await update.message.reply_photo(photo=photo, caption=f"Technical chart for {symbol}")
+    except Exception as e:
+        await update.message.reply_text(f"Error generating chart: {e}")
+
+# Then call this function where needed, for example in your handle_command_analyze function:
+# await send_analysis(update, message, recommendations, stock_data, symbol)
     
 async def handle_help_command(update: Update, context: ContextTypes.DEFAULT_TYPE):
     help_text = (
