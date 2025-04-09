@@ -32,10 +32,22 @@ IST_TIMEZONE = pytz.timezone('Asia/Kolkata')
 app = Flask(__name__, template_folder=TEMPLATES_DIR)
 app.config['JSON_SORT_KEYS'] = False
 
-# Initialize Telegram bot
+from telegram import Bot
+from telegram.ext import Updater, Dispatcher
+
+TELEGRAM_BOT_TOKEN = "YOUR_TELEGRAM_BOT_TOKEN"
+
+# Initialize the Bot instance
 bot = Bot(TELEGRAM_BOT_TOKEN)
-updater = Updater(TELEGRAM_BOT_TOKEN)
+
+# Initialize the Updater with the bot token
+updater = Updater(TELEGRAM_BOT_TOKEN, use_context=True)
+
+# Get the Dispatcher from the Updater instance
 dispatcher = updater.dispatcher
+
+# Bot is now ready for configuration
+print("Bot initialized successfully!")
 
 # Global variables to store recommendations and analysis
 current_recommendations = {}
