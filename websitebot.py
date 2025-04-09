@@ -1391,158 +1391,159 @@ def create_templates():
     with open('templates/sites.html', 'w') as f:
         f.write(sites_html)
     
-    # Create recommendations.html
-    recommendations_html = '''
-    <!DOCTYPE html>
-    <html lang="en">
-    <head>
-        <meta charset="UTF-8">
-        <meta name="viewport" content="width=device-width, initial-scale=1.0">
-        <title>Stock Recommendations - ChartInk Scraper</title>
-        <link href="https://cdn.jsdelivr.net/npm/bootstrap@5.1.3/dist/css/bootstrap.min.css" rel="stylesheet">
-        <style>
-            .recommendation-card {
-                margin-bottom: 15px;
-            }
-            .rec-buy {
-                background-color: #d4edda;
-                border-color: #c3e6cb;
-            }
-            .rec-strong-buy {
-                background-color: #c3e6cb;
-                border-color: #b1dfbb;
-            }
-            .rec-hold {
-                background-color: #fff3cd;
-                border-color: #ffeeba;
-            }
-            .rec-sell, .rec-weak-sell {
-                background-color: #f8d7da;
-                border-color: #f5c6cb;
-            }
-        </style>
-    </head>
-    <body>
-        <nav class="navbar navbar-expand-lg navbar-dark bg-dark">
-    # Continue recommendations.html template
-    recommendations_html_continued = '''
-            <div class="container">
-                <a class="navbar-brand" href="/">ChartInk Scraper</a>
-                <button class="navbar-toggler" type="button" data-bs-toggle="collapse" data-bs-target="#navbarNav">
-                    <span class="navbar-toggler-icon"></span>
-                </button>
-                <div class="collapse navbar-collapse" id="navbarNav">
-                    <ul class="navbar-nav">
-                        <li class="nav-item">
-                            <a class="nav-link" href="/">Home</a>
-                        </li>
-                        <li class="nav-item">
-                            <a class="nav-link active" href="/recommendations">Recommendations</a>
-                        </li>
-                        <li class="nav-item">
-                            <a class="nav-link" href="/sites">Manage Sites</a>
-                        </li>
-                    </ul>
-                </div>
-            </div>
-        </nav>
+   # Create recommendations.html
+recommendations_html = '''
+<!DOCTYPE html>
+<html lang="en">
+<head>
+    <meta charset="UTF-8">
+    <meta name="viewport" content="width=device-width, initial-scale=1.0">
+    <title>Stock Recommendations - ChartInk Scraper</title>
+    <link href="https://cdn.jsdelivr.net/npm/bootstrap@5.1.3/dist/css/bootstrap.min.css" rel="stylesheet">
+    <style>
+        .recommendation-card {
+            margin-bottom: 15px;
+        }
+        .rec-buy {
+            background-color: #d4edda;
+            border-color: #c3e6cb;
+        }
+        .rec-strong-buy {
+            background-color: #c3e6cb;
+            border-color: #b1dfbb;
+        }
+        .rec-hold {
+            background-color: #fff3cd;
+            border-color: #ffeeba;
+        }
+        .rec-sell, .rec-weak-sell {
+            background-color: #f8d7da;
+            border-color: #f5c6cb;
+        }
+    </style>
+</head>
+<body>
+    <nav class="navbar navbar-expand-lg navbar-dark bg-dark">
+'''
 
-        <div class="container mt-4">
-            <h2>Stock Recommendations</h2>
-            
-            <!-- Filter Form -->
-            <div class="card mb-4">
-                <div class="card-body">
-                    <form method="get" class="row g-3">
-                        <div class="col-md-3">
-                            <label for="site_id" class="form-label">Site</label>
-                            <select id="site_id" name="site_id" class="form-select">
-                                <option value="">All Sites</option>
-                                {% for site in sites %}
-                                <option value="{{ site.id }}" {% if filters.site_id == site.id %}selected{% endif %}>
-                                    {{ site.name }}
-                                </option>
-                                {% endfor %}
-                            </select>
-                        </div>
-                        <div class="col-md-3">
-                            <label for="symbol" class="form-label">Symbol</label>
-                            <input type="text" class="form-control" id="symbol" name="symbol" 
-                                   value="{{ filters.symbol }}" placeholder="Enter symbol">
-                        </div>
-                        <div class="col-md-3">
-                            <label for="type" class="form-label">Recommendation Type</label>
-                            <select id="type" name="type" class="form-select">
-                                <option value="">All Types</option>
-                                {% for type in rec_types %}
-                                <option value="{{ type }}" {% if filters.type == type %}selected{% endif %}>
-                                    {{ type }}
-                                </option>
-                                {% endfor %}
-                            </select>
-                        </div>
-                        <div class="col-md-2">
-                            <label for="days" class="form-label">Days</label>
-                            <select id="days" name="days" class="form-select">
-                                <option value="1" {% if filters.days == 1 %}selected{% endif %}>1 day</option>
-                                <option value="3" {% if filters.days == 3 %}selected{% endif %}>3 days</option>
-                                <option value="7" {% if filters.days == 7 %}selected{% endif %}>7 days</option>
-                                <option value="14" {% if filters.days == 14 %}selected{% endif %}>14 days</option>
-                                <option value="30" {% if filters.days == 30 %}selected{% endif %}>30 days</option>
-                            </select>
-                        </div>
-                        <div class="col-md-1">
-                            <label class="form-label">&nbsp;</label>
-                            <button type="submit" class="btn btn-primary w-100">Filter</button>
-                        </div>
-                    </form>
-                </div>
+# Continue recommendations.html template - note the consistent indentation level
+recommendations_html_continued = '''
+        <div class="container">
+            <a class="navbar-brand" href="/">ChartInk Scraper</a>
+            <button class="navbar-toggler" type="button" data-bs-toggle="collapse" data-bs-target="#navbarNav">
+                <span class="navbar-toggler-icon"></span>
+            </button>
+            <div class="collapse navbar-collapse" id="navbarNav">
+                <ul class="navbar-nav">
+                    <li class="nav-item">
+                        <a class="nav-link" href="/">Home</a>
+                    </li>
+                    <li class="nav-item">
+                        <a class="nav-link active" href="/recommendations">Recommendations</a>
+                    </li>
+                    <li class="nav-item">
+                        <a class="nav-link" href="/sites">Manage Sites</a>
+                    </li>
+                </ul>
             </div>
-            
-            <!-- Results Count -->
-            <p>Found {{ recommendations|length }} recommendations</p>
-            
-            <!-- Recommendations List -->
-            <div class="row">
-                {% for rec in recommendations %}
-                <div class="col-md-4">
-                    <div class="card recommendation-card rec-{{ rec.recommendation_type.lower().replace(' ', '-') }}">
-                        <div class="card-body">
-                            <h5 class="card-title">{{ rec.symbol }} - {{ rec.stock_name }}</h5>
-                            <h6 class="card-subtitle mb-2 text-muted">{{ rec.recommendation_type }}</h6>
-                            <p class="card-text">
-                                Price: {{ rec.current_price }} ({{ rec.pct_change }})<br>
-                                Volume: {{ rec.volume }}<br>
-                                {% if rec.industry != 'N/A' %}Industry: {{ rec.industry }}<br>{% endif %}
-                                {% if rec.pe_ratio %}P/E: {{ rec.pe_ratio }}<br>{% endif %}
-                                {% if rec.year_high %}52W High/Low: {{ rec.year_high }}/{{ rec.year_low }}<br>{% endif %}
-                                From: {{ rec.site_name }}<br>
-                                <small class="text-muted">{{ rec.processed_at }}</small>
-                            </p>
-                            {% if rec.links %}
-                            <a href="{{ rec.links }}" target="_blank" class="btn btn-sm btn-outline-info">View Details</a>
-                            {% endif %}
-                        </div>
+        </div>
+    </nav>
+
+    <div class="container mt-4">
+        <h2>Stock Recommendations</h2>
+        
+        <!-- Filter Form -->
+        <div class="card mb-4">
+            <div class="card-body">
+                <form method="get" class="row g-3">
+                    <div class="col-md-3">
+                        <label for="site_id" class="form-label">Site</label>
+                        <select id="site_id" name="site_id" class="form-select">
+                            <option value="">All Sites</option>
+                            {% for site in sites %}
+                            <option value="{{ site.id }}" {% if filters.site_id == site.id %}selected{% endif %}>
+                                {{ site.name }}
+                            </option>
+                            {% endfor %}
+                        </select>
+                    </div>
+                    <div class="col-md-3">
+                        <label for="symbol" class="form-label">Symbol</label>
+                        <input type="text" class="form-control" id="symbol" name="symbol" 
+                               value="{{ filters.symbol }}" placeholder="Enter symbol">
+                    </div>
+                    <div class="col-md-3">
+                        <label for="type" class="form-label">Recommendation Type</label>
+                        <select id="type" name="type" class="form-select">
+                            <option value="">All Types</option>
+                            {% for type in rec_types %}
+                            <option value="{{ type }}" {% if filters.type == type %}selected{% endif %}>
+                                {{ type }}
+                            </option>
+                            {% endfor %}
+                        </select>
+                    </div>
+                    <div class="col-md-2">
+                        <label for="days" class="form-label">Days</label>
+                        <select id="days" name="days" class="form-select">
+                            <option value="1" {% if filters.days == 1 %}selected{% endif %}>1 day</option>
+                            <option value="3" {% if filters.days == 3 %}selected{% endif %}>3 days</option>
+                            <option value="7" {% if filters.days == 7 %}selected{% endif %}>7 days</option>
+                            <option value="14" {% if filters.days == 14 %}selected{% endif %}>14 days</option>
+                            <option value="30" {% if filters.days == 30 %}selected{% endif %}>30 days</option>
+                        </select>
+                    </div>
+                    <div class="col-md-1">
+                        <label class="form-label">&nbsp;</label>
+                        <button type="submit" class="btn btn-primary w-100">Filter</button>
+                    </div>
+                </form>
+            </div>
+        </div>
+        
+        <!-- Results Count -->
+        <p>Found {{ recommendations|length }} recommendations</p>
+        
+        <!-- Recommendations List -->
+        <div class="row">
+            {% for rec in recommendations %}
+            <div class="col-md-4">
+                <div class="card recommendation-card rec-{{ rec.recommendation_type.lower().replace(' ', '-') }}">
+                    <div class="card-body">
+                        <h5 class="card-title">{{ rec.symbol }} - {{ rec.stock_name }}</h5>
+                        <h6 class="card-subtitle mb-2 text-muted">{{ rec.recommendation_type }}</h6>
+                        <p class="card-text">
+                            Price: {{ rec.current_price }} ({{ rec.pct_change }})<br>
+                            Volume: {{ rec.volume }}<br>
+                            {% if rec.industry != 'N/A' %}Industry: {{ rec.industry }}<br>{% endif %}
+                            {% if rec.pe_ratio %}P/E: {{ rec.pe_ratio }}<br>{% endif %}
+                            {% if rec.year_high %}52W High/Low: {{ rec.year_high }}/{{ rec.year_low }}<br>{% endif %}
+                            From: {{ rec.site_name }}<br>
+                            <small class="text-muted">{{ rec.processed_at }}</small>
+                        </p>
+                        {% if rec.links %}
+                        <a href="{{ rec.links }}" target="_blank" class="btn btn-sm btn-outline-info">View Details</a>
+                        {% endif %}
                     </div>
                 </div>
-                {% endfor %}
             </div>
-            
-            {% if not recommendations %}
-            <div class="alert alert-info">
-                No recommendations found for the selected filters.
-            </div>
-            {% endif %}
+            {% endfor %}
         </div>
+        
+        {% if not recommendations %}
+        <div class="alert alert-info">
+            No recommendations found for the selected filters.
+        </div>
+        {% endif %}
+    </div>
 
-        <script src="https://cdn.jsdelivr.net/npm/bootstrap@5.1.3/dist/js/bootstrap.bundle.min.js"></script>
-    </body>
-    </html>
-    '''
-    
-    recommendations_html = recommendations_html + recommendations_html_continued
-    with open('templates/recommendations.html', 'w') as f:
-        f.write(recommendations_html)
+    <script src="https://cdn.jsdelivr.net/npm/bootstrap@5.1.3/dist/js/bootstrap.bundle.min.js"></script>
+</body>
+</html>
+'''
+recommendations_html = recommendations_html + recommendations_html_continued
+with open('templates/recommendations.html', 'w') as f:
+    f.write(recommendations_html)
 
 # Main application entry point
 if __name__ == "__main__":
