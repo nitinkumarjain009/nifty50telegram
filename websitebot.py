@@ -1130,16 +1130,16 @@ def api_timeframe(timeframe):
     return jsonify(analysis_data)
 
 # Combined route for timeframe pages
-@app.route('/<timeframe>')
+# Change this route to be more specific
+@app.route('/timeframe/<timeframe>')
 def timeframe_analysis(timeframe):
     """
     Page for timeframe analysis (daily, weekly, monthly)
     Accepts timeframe parameter: 'daily', 'weekly', 'monthly'
     """
     # Validate timeframe parameter
-    valid_timeframes = ['weekly', 'monthly']
+    valid_timeframes = ['daily', 'weekly', 'monthly']
     
-    # Redirect to home for daily or invalid timeframes
     if timeframe not in valid_timeframes:
         return redirect('/')
     
@@ -1148,12 +1148,14 @@ def timeframe_analysis(timeframe):
                           market_status=is_market_hours(),
                           last_update=last_update_time)
 
-def generate_timeframe_analysis(timeframe):
-    """Generate analysis for different timeframes (weekly or monthly)"""
-    stocks_df = load_stock_data()
-    
-    if stocks_df.empty:
-        return {}
+# Keep these specific routes for backward compatibility
+@app.route('/weekly')
+def weekly_analysis():
+    return redirect('/timeframe/weekly')
+
+@app.route('/monthly')
+def monthly_analysis():
+    return redirect('/timeframe/monthly')
     
     # Categories for RSI-based classification
     rsi_categories = {
