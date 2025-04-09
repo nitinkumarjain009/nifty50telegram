@@ -1,973 +1,1127 @@
-#!/usr/bin/env python3
-"""
-Enhanced Stock Recommendations Bot
-- Reads stock data from nifty50_stocks.csv with multiple timeframes (daily, weekly, monthly)
-- Generates buy/sell recommendations based on ADX and RSI across timeframes
-- Fetches additional data from nifty500-trading-bot.onrender.com
-- Sends comprehensive table-based recommendations to Telegram
-- Hosts a webpage displaying the recommendations with additional details
-"""
-
-import requests
-import json
-import time
-import logging
-import sys
 import pandas as pd
+import numpy as np
 import os
-from datetime import datetime
-from flask import Flask, render_template, jsonify
+import time
+import datetime
+import pytz
+import requests
+import talib as ta
+import schedule
 import threading
-import csv
-import tabulate  # For creating tables in Telegram messages
-
-# Configure logging
-logging.basicConfig(
-    level=logging.INFO,
-    format='%(asctime)s - %(name)s - %(levelname)s - %(message)s',
-    handlers=[
-        logging.FileHandler("stock_bot.log"),
-        logging.StreamHandler(sys.stdout)
-    ]
-)
-logger = logging.getLogger("StockBot")
+from flask import Flask, render_template, jsonify
+import telepot
+from telepot.loop import MessageLoop
+import plotly.graph_objects as go
+import plotly.io as pio
+from plotly.subplots import make_subplots
+import warnings
+warnings.filterwarnings('ignore')
 
 # Configuration
-STOCK_API_URL = "https://nifty500-trading-bot.onrender.com/api/data"
-TELEGRAM_BOT_TOKEN = "8017759392:AAEwM-W-y83lLXTjlPl8sC_aBmizuIrFXnU"
-TELEGRAM_CHAT_ID = "711856868"
-TELEGRAM_CHANNEL = "@Stockniftybot"
-CHECK_INTERVAL = 3600  # Check every hour (in seconds)
-WEB_PORT = int(os.environ.get("PORT", 5000))  # Use environment PORT or default to 5000
-CSV_FILE_PATH = "nifty50_stocks.csv"  # Path to the CSV file
+TELEGRAM_BOT_TOKEN = "YOUR_TELEGRAM_BOT_TOKEN"
+TELEGRAM_CHAT_ID = "YOUR_TELEGRAM_CHAT_ID"
+TELEGRAM_GROUP = "@Stockniftybot"  # Telegram group username
+CSV_FILE_PATH = "nifty50_stocks.csv"
+TEMPLATES_DIR = "templates"
+MARKET_OPEN_TIME = "09:15"  # IST
+MARKET_CLOSE_TIME = "15:30"  # IST
+CHECK_INTERVAL_MINUTES = 5  # Check every 5 minutes during market hours
+IST_TIMEZONE = pytz.timezone('Asia/Kolkata')
 
-# Store data for the web server
-latest_data = {
-    "buy_recommendations": [],
-    "sell_recommendations": [],
-    "all_stocks": [],  # Store all stocks regardless of recommendation
-    "last_updated": None
-}
+# Initialize the Flask app
+app = Flask(__name__, template_folder=TEMPLATES_DIR)
+app.config['JSON_SORT_KEYS'] = False
 
-# Initialize Flask app
-app = Flask(__name__)
+# Initialize Telegram bot
+bot = telepot.Bot(TELEGRAM_BOT_TOKEN)
 
-def create_csv_if_not_exists():
-    """Create the CSV file with headers if it doesn't exist"""
-    if not os.path.exists(CSV_FILE_PATH):
-        logger.info(f"CSV file not found. Creating {CSV_FILE_PATH} with headers")
-        with open(CSV_FILE_PATH, 'w', newline='') as csvfile:
-            writer = csv.writer(csvfile)
-            writer.writerow([
-                'symbol', 'close', 'change_percent', 'volume',
-                'daily_rsi', 'daily_adx', 
-                'weekly_rsi', 'weekly_adx',
-                'monthly_rsi', 'monthly_adx'
-            ])
-        logger.info(f"Created {CSV_FILE_PATH}. Please populate it with stock data")
+# Global variables to store recommendations and analysis
+current_recommendations = {}
+daily_analysis = {}
+last_update_time = None
 
-def read_stock_data_from_csv():
-    """Read stock data from the CSV file"""
+def is_market_hours():
+    """Check if it's currently market hours in IST"""
+    now = datetime.datetime.now(IST_TIMEZONE)
+    current_time = now.strftime("%H:%M")
+    current_day = now.weekday()
+    
+    # Check if it's a weekday (0-4 is Monday to Friday)
+    if current_day < 5:
+        return MARKET_OPEN_TIME <= current_time <= MARKET_CLOSE_TIME
+    return False
+
+def load_stock_data():
+    """Load stocks data from CSV file"""
     try:
-        create_csv_if_not_exists()
-        
-        if os.path.getsize(CSV_FILE_PATH) == 0:
-            logger.warning(f"CSV file {CSV_FILE_PATH} is empty")
-            return []
-            
-        df = pd.read_csv(CSV_FILE_PATH)
-        logger.info(f"Successfully read {len(df)} stocks from CSV file")
-        return df.to_dict('records')
+        return pd.read_csv(CSV_FILE_PATH)
     except Exception as e:
-        logger.error(f"Error reading CSV file: {e}")
-        return []
+        print(f"Error loading stock data: {e}")
+        send_telegram_message(f"Error loading stock data: {e}")
+        return pd.DataFrame()
 
-def get_recommendation(stock_data):
-    """
-    Determine buy/sell recommendation based on multiple timeframes
-    
-    Rules:
-    - Strong Buy: Daily and Weekly both show buy signals
-    - Buy: Daily shows buy signal, Weekly is neutral or buy
-    - Strong Sell: Daily and Weekly both show sell signals
-    - Sell: Daily shows sell signal, Weekly is neutral or sell
-    - Neutral: Mixed or no clear signals
-    """
-    daily_rsi = stock_data.get('daily_rsi', 50)
-    daily_adx = stock_data.get('daily_adx', 15)
-    weekly_rsi = stock_data.get('weekly_rsi', 50)
-    weekly_adx = stock_data.get('weekly_adx', 15)
-    monthly_rsi = stock_data.get('monthly_rsi', 50)
-    monthly_adx = stock_data.get('monthly_adx', 15)
-    
-    # Check for buy signals
-    daily_buy = daily_rsi < 40 and daily_adx > 20
-    weekly_buy = weekly_rsi < 40 and weekly_adx > 20
-    monthly_buy = monthly_rsi < 40 and monthly_adx > 20
-    
-    # Check for sell signals
-    daily_sell = daily_rsi > 60 and daily_adx > 20
-    weekly_sell = weekly_rsi > 60 and weekly_adx > 20
-    monthly_sell = monthly_rsi > 60 and monthly_adx > 20
-    
-    # Calculate signal strength (1-10)
-    buy_strength = 0
-    sell_strength = 0
-    
-    # Daily timeframe (most weight): up to 5 points
-    if daily_buy:
-        buy_strength += 2.5 + ((40 - daily_rsi) / 40) * 2.5
-    if daily_sell:
-        sell_strength += 2.5 + ((daily_rsi - 60) / 40) * 2.5
-    
-    # Weekly timeframe: up to 3 points
-    if weekly_buy:
-        buy_strength += 1.5 + ((40 - weekly_rsi) / 40) * 1.5
-    if weekly_sell:
-        sell_strength += 1.5 + ((weekly_rsi - 60) / 40) * 1.5
-    
-    # Monthly timeframe: up to 2 points
-    if monthly_buy:
-        buy_strength += 1 + ((40 - monthly_rsi) / 40) * 1
-    if monthly_sell:
-        sell_strength += 1 + ((monthly_rsi - 60) / 40) * 1
-    
-    # Cap strengths between 1-10
-    buy_strength = min(10, max(1, buy_strength if buy_strength > 0 else 0))
-    sell_strength = min(10, max(1, sell_strength if sell_strength > 0 else 0))
-    
-    # Determine recommendation
-    if buy_strength > sell_strength:
-        if daily_buy and weekly_buy:
-            recommendation = "STRONG BUY"
-        else:
-            recommendation = "BUY"
-        signal_strength = buy_strength
-    elif sell_strength > buy_strength:
-        if daily_sell and weekly_sell:
-            recommendation = "STRONG SELL"
-        else:
-            recommendation = "SELL"
-        signal_strength = sell_strength
-    else:
-        recommendation = "NEUTRAL"
-        signal_strength = max(buy_strength, sell_strength, 1)  # At least 1
-    
-    return {
-        'recommendation': recommendation,
-        'signal_strength': round(signal_strength, 1)  # Round to 1 decimal place
-    }
-
-def calculate_target_price(stock_data):
-    """Calculate target price based on recommendation, RSI and ADX across timeframes"""
-    price = stock_data.get('close', 0)
-    recommendation = stock_data.get('recommendation', 'NEUTRAL')
-    
-    # Factor in signal strength
-    signal_strength = stock_data.get('signal_strength', 5)
-    
-    # Calculate target based on recommendation and signal strength
-    if recommendation == "STRONG BUY":
-        target = price * (1 + 0.03 + (signal_strength / 100))
-    elif recommendation == "BUY":
-        target = price * (1 + 0.02 + (signal_strength / 150))
-    elif recommendation == "STRONG SELL":
-        target = price * (1 - 0.03 - (signal_strength / 100))
-    elif recommendation == "SELL":
-        target = price * (1 - 0.02 - (signal_strength / 150))
-    else:  # NEUTRAL
-        target = price * (1 + 0.01)  # Slight upward bias
-    
-    return round(target, 2)
-
-def analyze_stocks(stocks):
-    """Analyze stocks using multiple timeframes and determine recommendations"""
-    buy_recommendations = []
-    sell_recommendations = []
-    all_stocks = []
-    
-    for stock in stocks:
-        # Get recommendation based on all timeframes
-        recommendation_data = get_recommendation(stock)
-        
-        # Add recommendation and signal strength to stock data
-        stock['recommendation'] = recommendation_data['recommendation'] 
-        stock['signal_strength'] = recommendation_data['signal_strength']
-        
-        # Calculate target price
-        stock['target_price'] = calculate_target_price(stock)
-        
-        # Store in appropriate lists
-        all_stocks.append(stock)
-        
-        if "BUY" in stock['recommendation']:
-            buy_recommendations.append(stock)
-        elif "SELL" in stock['recommendation']:
-            sell_recommendations.append(stock)
-    
-    # Sort by signal strength (highest first)
-    buy_recommendations.sort(key=lambda x: x.get('signal_strength', 0), reverse=True)
-    sell_recommendations.sort(key=lambda x: x.get('signal_strength', 0), reverse=True)
-    all_stocks.sort(key=lambda x: x.get('symbol', ''))  # Sort alphabetically
-    
-    return {
-        'buy_recommendations': buy_recommendations,
-        'sell_recommendations': sell_recommendations,
-        'all_stocks': all_stocks,
-        'updated_at': datetime.now().strftime('%Y-%m-%d %H:%M:%S')
-    }
-
-def fetch_additional_data():
-    """Fetch additional stock data from the API"""
+def fetch_latest_data(symbol):
+    """Fetch latest stock data for the given symbol"""
     try:
-        logger.info("Fetching additional stock data from API...")
-        response = requests.get(STOCK_API_URL, timeout=30)
-        response.raise_for_status()  # Raise exception for 4XX/5XX responses
-        return response.json()
-    except requests.exceptions.RequestException as e:
-        logger.error(f"Error fetching additional stock data: {e}")
+        # This is a placeholder. In a real implementation, you would use an API like
+        # NSE India, Yahoo Finance, AlphaVantage, etc. to fetch real-time data
+        # For this example, we'll simulate data
+        
+        # Simulation: Get historical data and add some random variation for today
+        hist_data = pd.DataFrame({
+            'date': pd.date_range(end=datetime.datetime.now(), periods=100, freq='D'),
+            'open': np.random.normal(500, 10, 100),
+            'high': np.random.normal(505, 15, 100),
+            'low': np.random.normal(495, 15, 100),
+            'close': np.random.normal(500, 10, 100),
+            'volume': np.random.normal(1000000, 200000, 100)
+        })
+        
+        # Make sure high is the highest and low is the lowest for each day
+        for i in range(len(hist_data)):
+            values = [hist_data.loc[i, 'open'], hist_data.loc[i, 'close']]
+            hist_data.loc[i, 'high'] = max(values) + abs(np.random.normal(0, 2))
+            hist_data.loc[i, 'low'] = min(values) - abs(np.random.normal(0, 2))
+        
+        hist_data['symbol'] = symbol
+        return hist_data
+    except Exception as e:
+        print(f"Error fetching data for {symbol}: {e}")
+        return pd.DataFrame()
+
+def calculate_indicators(df):
+    """Calculate technical indicators for the given dataframe"""
+    try:
+        # Ensure the dataframe has the required columns
+        required_columns = ['close', 'high', 'low', 'volume']
+        if not all(col in df.columns for col in required_columns):
+            raise ValueError("Data missing required columns for technical analysis")
+        
+        # Convert columns to numeric if they aren't already
+        for col in required_columns:
+            df[col] = pd.to_numeric(df[col], errors='coerce')
+        
+        # Calculate Moving Averages
+        df['SMA_20'] = ta.SMA(df['close'].values, timeperiod=20)
+        df['SMA_50'] = ta.SMA(df['close'].values, timeperiod=50)
+        df['SMA_200'] = ta.SMA(df['close'].values, timeperiod=200)
+        
+        # Calculate EMA
+        df['EMA_12'] = ta.EMA(df['close'].values, timeperiod=12)
+        df['EMA_26'] = ta.EMA(df['close'].values, timeperiod=26)
+        
+        # Calculate MACD
+        df['MACD'], df['MACD_Signal'], df['MACD_Hist'] = ta.MACD(
+            df['close'].values, fastperiod=12, slowperiod=26, signalperiod=9
+        )
+        
+        # Calculate RSI
+        df['RSI'] = ta.RSI(df['close'].values, timeperiod=14)
+        
+        # Calculate Bollinger Bands
+        df['BB_Upper'], df['BB_Middle'], df['BB_Lower'] = ta.BBANDS(
+            df['close'].values, timeperiod=20, nbdevup=2, nbdevdn=2, matype=0
+        )
+        
+        # Calculate Stochastic
+        df['SlowK'], df['SlowD'] = ta.STOCH(
+            df['high'].values, df['low'].values, df['close'].values,
+            fastk_period=14, slowk_period=3, slowk_matype=0, slowd_period=3, slowd_matype=0
+        )
+        
+        # Calculate ADX
+        df['ADX'] = ta.ADX(df['high'].values, df['low'].values, df['close'].values, timeperiod=14)
+        
+        # Calculate OBV (On-Balance Volume)
+        df['OBV'] = ta.OBV(df['close'].values, df['volume'].values)
+        
+        # Calculate ATR
+        df['ATR'] = ta.ATR(df['high'].values, df['low'].values, df['close'].values, timeperiod=14)
+        
+        # Calculate VWAP (Volume Weighted Average Price) - custom implementation
+        df['VWAP'] = (df['volume'] * df['close']).cumsum() / df['volume'].cumsum()
+        
+        return df
+    except Exception as e:
+        print(f"Error calculating indicators: {e}")
+        return df
+
+def get_recommendations(df, symbol):
+    """Generate trading recommendations based on technical indicators"""
+    try:
+        # Get the latest data point which contains all our indicators
+        latest = df.iloc[-1]
+        prev = df.iloc[-2] if len(df) > 1 else latest
+        
+        recommendations = {}
+        
+        # Moving Average recommendations
+        if latest['close'] > latest['SMA_20'] and prev['close'] <= prev['SMA_20']:
+            recommendations['SMA_20'] = 'BUY'
+        elif latest['close'] < latest['SMA_20'] and prev['close'] >= prev['SMA_20']:
+            recommendations['SMA_20'] = 'SELL'
+        else:
+            recommendations['SMA_20'] = 'HOLD'
+            
+        if latest['close'] > latest['SMA_50'] and prev['close'] <= prev['SMA_50']:
+            recommendations['SMA_50'] = 'BUY'
+        elif latest['close'] < latest['SMA_50'] and prev['close'] >= prev['SMA_50']:
+            recommendations['SMA_50'] = 'SELL'
+        else:
+            recommendations['SMA_50'] = 'HOLD'
+            
+        # Golden Cross / Death Cross
+        if latest['SMA_50'] > latest['SMA_200'] and prev['SMA_50'] <= prev['SMA_200']:
+            recommendations['Golden_Cross'] = 'BUY'
+        elif latest['SMA_50'] < latest['SMA_200'] and prev['SMA_50'] >= prev['SMA_200']:
+            recommendations['Death_Cross'] = 'SELL'
+        else:
+            recommendations['MA_Cross'] = 'HOLD'
+        
+        # MACD recommendations
+        if latest['MACD'] > latest['MACD_Signal'] and prev['MACD'] <= prev['MACD_Signal']:
+            recommendations['MACD'] = 'BUY'
+        elif latest['MACD'] < latest['MACD_Signal'] and prev['MACD'] >= prev['MACD_Signal']:
+            recommendations['MACD'] = 'SELL'
+        else:
+            recommendations['MACD'] = 'HOLD'
+        
+        # RSI recommendations
+        if latest['RSI'] < 30:
+            recommendations['RSI'] = 'BUY'
+        elif latest['RSI'] > 70:
+            recommendations['RSI'] = 'SELL'
+        else:
+            recommendations['RSI'] = 'HOLD'
+        
+        # Bollinger Bands recommendations
+        if latest['close'] < latest['BB_Lower']:
+            recommendations['Bollinger'] = 'BUY'
+        elif latest['close'] > latest['BB_Upper']:
+            recommendations['Bollinger'] = 'SELL'
+        else:
+            recommendations['Bollinger'] = 'HOLD'
+        
+        # Stochastic recommendations
+        if latest['SlowK'] < 20 and latest['SlowD'] < 20 and latest['SlowK'] > latest['SlowD']:
+            recommendations['Stochastic'] = 'BUY'
+        elif latest['SlowK'] > 80 and latest['SlowD'] > 80 and latest['SlowK'] < latest['SlowD']:
+            recommendations['Stochastic'] = 'SELL'
+        else:
+            recommendations['Stochastic'] = 'HOLD'
+        
+        # ADX recommendations (trend strength)
+        if latest['ADX'] > 25:
+            trend_strength = 'STRONG'
+        else:
+            trend_strength = 'WEAK'
+        recommendations['ADX'] = trend_strength
+        
+        # Aggregate recommendation
+        buy_count = sum(1 for rec in recommendations.values() if rec == 'BUY')
+        sell_count = sum(1 for rec in recommendations.values() if rec == 'SELL')
+        
+        if buy_count > sell_count and buy_count >= 3:
+            overall = 'BUY'
+        elif sell_count > buy_count and sell_count >= 3:
+            overall = 'SELL'
+        else:
+            overall = 'HOLD'
+        
+        recommendations['OVERALL'] = overall
+        
+        return {
+            'symbol': symbol,
+            'timestamp': datetime.datetime.now(IST_TIMEZONE).strftime('%Y-%m-%d %H:%M:%S'),
+            'price': round(latest['close'], 2),
+            'recommendations': recommendations
+        }
+    except Exception as e:
+        print(f"Error generating recommendations for {symbol}: {e}")
+        return {
+            'symbol': symbol,
+            'timestamp': datetime.datetime.now(IST_TIMEZONE).strftime('%Y-%m-%d %H:%M:%S'),
+            'error': str(e)
+        }
+
+def create_technical_chart(df, symbol):
+    """Create a technical analysis chart using Plotly"""
+    try:
+        # Create subplot with 3 rows
+        fig = make_subplots(rows=3, cols=1, 
+                            shared_xaxes=True, 
+                            vertical_spacing=0.05,
+                            row_heights=[0.6, 0.2, 0.2],
+                            subplot_titles=(f"{symbol} Price", "Volume", "RSI"))
+        
+        # Add candlestick chart
+        fig.add_trace(go.Candlestick(x=df['date'],
+                                     open=df['open'],
+                                     high=df['high'],
+                                     low=df['low'],
+                                     close=df['close'],
+                                     name='Price'),
+                      row=1, col=1)
+        
+        # Add Moving Averages
+        fig.add_trace(go.Scatter(x=df['date'], y=df['SMA_20'], name='SMA 20', line=dict(color='blue')), row=1, col=1)
+        fig.add_trace(go.Scatter(x=df['date'], y=df['SMA_50'], name='SMA 50', line=dict(color='orange')), row=1, col=1)
+        fig.add_trace(go.Scatter(x=df['date'], y=df['SMA_200'], name='SMA 200', line=dict(color='red')), row=1, col=1)
+        
+        # Add Bollinger Bands
+        fig.add_trace(go.Scatter(x=df['date'], y=df['BB_Upper'], name='BB Upper', line=dict(color='rgba(173, 204, 255, 0.7)')), row=1, col=1)
+        fig.add_trace(go.Scatter(x=df['date'], y=df['BB_Lower'], name='BB Lower', line=dict(color='rgba(173, 204, 255, 0.7)')), row=1, col=1)
+        
+        # Add volume bar chart
+        colors = ['green' if row['close'] >= row['open'] else 'red' for _, row in df.iterrows()]
+        fig.add_trace(go.Bar(x=df['date'], y=df['volume'], name='Volume', marker_color=colors), row=2, col=1)
+        
+        # Add RSI
+        fig.add_trace(go.Scatter(x=df['date'], y=df['RSI'], name='RSI', line=dict(color='purple')), row=3, col=1)
+        fig.add_trace(go.Scatter(x=df['date'], y=[70] * len(df), name='RSI Overbought', line=dict(color='rgba(255,0,0,0.5)', dash='dash')), row=3, col=1)
+        fig.add_trace(go.Scatter(x=df['date'], y=[30] * len(df), name='RSI Oversold', line=dict(color='rgba(0,255,0,0.5)', dash='dash')), row=3, col=1)
+        
+        # Update layout
+        fig.update_layout(title=f'Technical Analysis for {symbol}',
+                          xaxis_rangeslider_visible=False,
+                          height=800,
+                          width=1200,
+                          showlegend=True)
+        
+        # Update y-axis labels
+        fig.update_yaxes(title_text="Price", row=1, col=1)
+        fig.update_yaxes(title_text="Volume", row=2, col=1)
+        fig.update_yaxes(title_text="RSI", row=3, col=1)
+        
+        return fig
+    except Exception as e:
+        print(f"Error creating chart for {symbol}: {e}")
         return None
 
-def merge_stock_data(csv_data, api_data):
-    """Merge stock data from CSV and API"""
-    if not api_data or 'buy_recommendations' not in api_data:
-        return csv_data
-    
-    # Create a dictionary of symbols from API data for easy lookup
-    api_stocks = {}
-    for stock in api_data.get('buy_recommendations', []):
-        api_stocks[stock.get('symbol')] = stock
-    
-    # Enhance CSV data with any additional fields from API data
-    for stock in csv_data.get('all_stocks', []):
-        symbol = stock.get('symbol')
-        if symbol in api_stocks:
-            # Copy any missing fields from API data
-            for key, value in api_stocks[symbol].items():
-                if key not in stock or stock[key] is None:
-                    stock[key] = value
-    
-    return csv_data
+def send_telegram_message(message, target=None):
+    """Send a message to Telegram channel or group"""
+    try:
+        if target is None:
+            # Send to personal chat ID
+            bot.sendMessage(TELEGRAM_CHAT_ID, message, parse_mode='Markdown')
+            print(f"Message sent to Telegram chat: {message[:50]}...")
+            
+            # Also send to group
+            bot.sendMessage(TELEGRAM_GROUP, message, parse_mode='Markdown')
+            print(f"Message sent to Telegram group {TELEGRAM_GROUP}: {message[:50]}...")
+        else:
+            # Send to specified target
+            bot.sendMessage(target, message, parse_mode='Markdown')
+            print(f"Message sent to Telegram {target}: {message[:50]}...")
+    except Exception as e:
+        print(f"Error sending Telegram message: {e}")
 
-def format_recommendations_text(data, recommendation_type=None):
-    """Format recommendations into a text message for Telegram"""
-    recommendations = []
+def send_telegram_photo(photo_path, caption, target=None):
+    """Send a photo to Telegram channel or group"""
+    try:
+        if target is None:
+            # Send to personal chat ID
+            with open(photo_path, 'rb') as photo:
+                bot.sendPhoto(TELEGRAM_CHAT_ID, photo, caption=caption)
+            print(f"Photo sent to Telegram chat: {caption[:50]}...")
+            
+            # Also send to group
+            with open(photo_path, 'rb') as photo:
+                bot.sendPhoto(TELEGRAM_GROUP, photo, caption=caption)
+            print(f"Photo sent to Telegram group {TELEGRAM_GROUP}: {caption[:50]}...")
+        else:
+            # Send to specified target
+            with open(photo_path, 'rb') as photo:
+                bot.sendPhoto(target, photo, caption=caption)
+            print(f"Photo sent to Telegram {target}: {caption[:50]}...")
+    except Exception as e:
+        print(f"Error sending Telegram photo: {e}")
+
+def format_recommendations_message(recommendations):
+    """Format recommendations for Telegram message"""
+    msg = f"*Stock Recommendations ({recommendations['timestamp']})*\n\n"
+    msg += f"*Symbol: {recommendations['symbol']}*\n"
+    msg += f"Price: ₹{recommendations['price']}\n\n"
     
-    if recommendation_type == 'buy':
-        recommendations = data.get('buy_recommendations', [])
-        emoji = "🟢" 
-        title = "STOCK BUY RECOMMENDATIONS"
-    elif recommendation_type == 'sell':
-        recommendations = data.get('sell_recommendations', [])
-        emoji = "🔴"
-        title = "STOCK SELL RECOMMENDATIONS"
-    else:
-        recommendations = data.get('all_stocks', [])
-        emoji = "📊"
-        title = "ALL STOCKS ANALYSIS"
+    msg += "*Technical Indicators:*\n"
+    for indicator, signal in recommendations['recommendations'].items():
+        if indicator != 'OVERALL':
+            msg += f"- {indicator}: {signal}\n"
     
-    if not recommendations:
-        return f"No {recommendation_type if recommendation_type else 'stock'} data available."
+    msg += f"\n*OVERALL RECOMMENDATION: {recommendations['recommendations']['OVERALL']}*"
+    return msg
+
+def run_analysis():
+    """Run analysis on all stocks and send recommendations"""
+    global current_recommendations, last_update_time
     
-    message_parts = [f"{emoji} *{title}* {emoji}\n"]
+    stocks_df = load_stock_data()
+    all_recommendations = []
     
-    # Add timestamp
-    updated_at = data.get('updated_at', datetime.now().strftime('%Y-%m-%d %H:%M:%S'))
-    message_parts.append(f"*Updated at:* {updated_at}\n")
+    if stocks_df.empty:
+        message = "❌ Error: Could not load stock data."
+        send_telegram_message(message)
+        return
     
-    # Add recommendations
-    for i, stock in enumerate(recommendations[:10], 1):  # Limit to top 10
-        signal_strength = stock.get('signal_strength', 0)
-        recommendation = stock.get('recommendation', 'NEUTRAL')
-        change_percent = stock.get('change_percent', 0)
-        change_symbol = "🟢" if change_percent > 0 else "🔴" if change_percent < 0 else "⚪"
+    print(f"Running analysis at {datetime.datetime.now(IST_TIMEZONE).strftime('%Y-%m-%d %H:%M:%S')}")
+    
+    # Process each stock
+    for _, row in stocks_df.iterrows():
+        symbol = row['symbol']
         
-        message_parts.append(
-            f"{i}. *{stock['symbol']}* - ₹{stock.get('close', 0):.2f} {change_symbol}\n"
-            f"   *{recommendation}* | Strength: {signal_strength}/10\n"
-            f"   Change: {change_percent:.2f}%\n"
-            f"   RSI (D/W/M): {stock.get('daily_rsi', 'N/A')}/{stock.get('weekly_rsi', 'N/A')}/{stock.get('monthly_rsi', 'N/A')}\n"
-            f"   ADX (D/W/M): {stock.get('daily_adx', 'N/A')}/{stock.get('weekly_adx', 'N/A')}/{stock.get('monthly_adx', 'N/A')}\n"
-            f"   Target: ₹{stock.get('target_price', 0):.2f}\n"
-        )
-    
-    message_parts.append("\n_Use these recommendations at your own risk. Always do your own research._")
-    
-    return "\n".join(message_parts)
-
-def create_markdown_table(data, max_rows=20):
-    """Create a markdown-formatted table for Telegram"""
-    # Prepare header
-    headers = ["Symbol", "CMP", "Rec", "Signal", "D-RSI", "D-ADX", "W-RSI", "W-ADX", "M-RSI", "M-ADX", "Target"]
-    
-    # Prepare rows
-    rows = []
-    for stock in data[:max_rows]:  # Limit to max_rows
-        recommendation = stock.get('recommendation', 'NEUTRAL')
-        # Short form of recommendation
-        rec_short = recommendation.replace("STRONG ", "S_")
+        # Fetch latest data
+        stock_data = fetch_latest_data(symbol)
         
-        rows.append([
-            stock.get('symbol', 'N/A'),
-            f"₹{stock.get('close', 0):.1f}",
-            rec_short,
-            f"{stock.get('signal_strength', 0):.1f}",
-            stock.get('daily_rsi', 'N/A'),
-            stock.get('daily_adx', 'N/A'),
-            stock.get('weekly_rsi', 'N/A'),
-            stock.get('weekly_adx', 'N/A'),
-            stock.get('monthly_rsi', 'N/A'),
-            stock.get('monthly_adx', 'N/A'),
-            f"₹{stock.get('target_price', 0):.1f}"
-        ])
+        if stock_data.empty:
+            print(f"Skipping {symbol} due to data fetching error")
+            continue
+        
+        # Calculate technical indicators
+        stock_data = calculate_indicators(stock_data)
+        
+        # Generate recommendations
+        recommendations = get_recommendations(stock_data, symbol)
+        all_recommendations.append(recommendations)
+        
+        # If it's a significant recommendation (BUY or SELL), send individual notification
+        if recommendations.get('recommendations', {}).get('OVERALL') in ['BUY', 'SELL']:
+            message = format_recommendations_message(recommendations)
+            send_telegram_message(message)  # Will send to both personal chat and group
+            
+            # Create and save chart
+            fig = create_technical_chart(stock_data, symbol)
+            if fig:
+                chart_path = f"static/{symbol}_chart.png"
+                pio.write_image(fig, chart_path)
+                send_telegram_photo(chart_path, f"Technical chart for {symbol}")  # Will send to both personal chat and group
     
-    # Generate the markdown table
-    table = tabulate.tabulate(rows, headers, tablefmt="pipe")
+    # Update global recommendations
+    current_recommendations = all_recommendations
+    last_update_time = datetime.datetime.now(IST_TIMEZONE).strftime('%Y-%m-%d %H:%M:%S')
     
-    return f"```\n{table}\n```"
+    return all_recommendations
 
-def send_table_to_telegram(data, recommendation_type=None):
-    """Send stock data as a formatted table to Telegram"""
-    # Get relevant data
-    if recommendation_type == 'buy':
-        stocks = data.get('buy_recommendations', [])
-        title = "🟢 STOCK BUY RECOMMENDATIONS 🟢"
-    elif recommendation_type == 'sell':
-        stocks = data.get('sell_recommendations', [])
-        title = "🔴 STOCK SELL RECOMMENDATIONS 🔴"
-    else:
-        stocks = data.get('all_stocks', [])
-        title = "📊 ALL STOCKS ANALYSIS 📊"
+def generate_daily_analysis():
+    """Generate daily analysis after market hours"""
+    global daily_analysis
     
-    # Create intro message
-    updated_at = data.get('updated_at', datetime.now().strftime('%Y-%m-%d %H:%M:%S'))
-    intro = f"*{title}*\n*Updated at:* {updated_at}\n\n"
+    stocks_df = load_stock_data()
     
-    # Create table if we have data
-    if not stocks:
-        message = f"{intro}No {recommendation_type if recommendation_type else 'stock'} data available."
-    else:
-        # Generate markdown table
-        table = create_markdown_table(stocks)
-        message = f"{intro}{table}\n\n_Use these recommendations at your own risk. Always do your own research._"
+    if stocks_df.empty:
+        message = "❌ Error: Could not load stock data for daily analysis."
+        send_telegram_message(message)
+        return
     
-    # Send message
-    recipients = [TELEGRAM_CHAT_ID, TELEGRAM_CHANNEL]
-    success = False
+    buy_recommendations = []
+    sell_recommendations = []
+    hold_recommendations = []
     
-    for recipient in recipients:
-        try:
-            url = f"https://api.telegram.org/bot{TELEGRAM_BOT_TOKEN}/sendMessage"
-            payload = {
-                "chat_id": recipient,
-                "text": message,
-                "parse_mode": "Markdown"
-            }
-            response = requests.post(url, json=payload, timeout=10)
-            response.raise_for_status()
-            logger.info(f"Table message sent successfully to {recipient}")
-            success = True
-        except Exception as e:
-            logger.error(f"Failed to send table message to {recipient}: {e}")
+    # Run analysis for all stocks
+    for _, row in stocks_df.iterrows():
+        symbol = row['symbol']
+        stock_data = fetch_latest_data(symbol)
+        
+        if stock_data.empty:
+            continue
+            
+        stock_data = calculate_indicators(stock_data)
+        recommendations = get_recommendations(stock_data, symbol)
+        
+        overall_rec = recommendations.get('recommendations', {}).get('OVERALL')
+        if overall_rec == 'BUY':
+            buy_recommendations.append({
+                'symbol': symbol,
+                'price': recommendations['price'],
+                'strength': sum(1 for rec in recommendations['recommendations'].values() if rec == 'BUY')
+            })
+        elif overall_rec == 'SELL':
+            sell_recommendations.append({
+                'symbol': symbol,
+                'price': recommendations['price'],
+                'strength': sum(1 for rec in recommendations['recommendations'].values() if rec == 'SELL')
+            })
+        else:
+            hold_recommendations.append({
+                'symbol': symbol,
+                'price': recommendations['price']
+            })
     
-    return success
+    # Sort by strength
+    buy_recommendations.sort(key=lambda x: x['strength'], reverse=True)
+    sell_recommendations.sort(key=lambda x: x['strength'], reverse=True)
+    
+    # Format the daily analysis message
+    now = datetime.datetime.now(IST_TIMEZONE)
+    message = f"*Daily Market Analysis - {now.strftime('%Y-%m-%d')}*\n\n"
+    
+    message += f"*BUY Recommendations ({len(buy_recommendations)}):*\n"
+    for i, rec in enumerate(buy_recommendations[:10], 1):
+        message += f"{i}. {rec['symbol']} at ₹{rec['price']} (Strength: {rec['strength']})\n"
+    
+    message += f"\n*SELL Recommendations ({len(sell_recommendations)}):*\n"
+    for i, rec in enumerate(sell_recommendations[:10], 1):
+        message += f"{i}. {rec['symbol']} at ₹{rec['price']} (Strength: {rec['strength']})\n"
+    
+    message += f"\n*HOLD Recommendations: {len(hold_recommendations)} stocks*"
+    
+    # Store daily analysis
+    daily_analysis = {
+        'date': now.strftime('%Y-%m-%d'),
+        'buy': buy_recommendations,
+        'sell': sell_recommendations,
+        'hold': len(hold_recommendations)
+    }
+    
+    # Send to Telegram - both personal chat and group
+    send_telegram_message(message)  # Will send to both
+    
+    return daily_analysis
 
-def update_stock_data():
-    """Fetch data and update both Telegram and the web server data"""
+def schedule_jobs():
+    """Schedule all jobs"""
+    # Schedule market hours checks every X minutes
+    schedule.every(CHECK_INTERVAL_MINUTES).minutes.do(lambda: job_wrapper(run_analysis) if is_market_hours() else None)
+    
+    # Schedule daily analysis at market close
+    schedule.every().day.at(MARKET_CLOSE_TIME).do(lambda: job_wrapper(generate_daily_analysis))
+    
+    # Run jobs continuously
     while True:
-        try:
-            # Read stock data from CSV
-            csv_stocks = read_stock_data_from_csv()
-            
-            if csv_stocks:
-                # Analyze stocks based on multiple timeframes
-                analyzed_data = analyze_stocks(csv_stocks)
-                
-                # Fetch additional data from API
-                api_data = fetch_additional_data()
-                
-                # Merge data from both sources
-                final_data = merge_stock_data(analyzed_data, api_data)
-                
-                # Update web data
-                global latest_data
-                latest_data["buy_recommendations"] = final_data.get('buy_recommendations', [])
-                latest_data["sell_recommendations"] = final_data.get('sell_recommendations', [])
-                latest_data["all_stocks"] = final_data.get('all_stocks', [])
-                latest_data["last_updated"] = final_data.get('updated_at', datetime.now().strftime('%Y-%m-%d %H:%M:%S'))
-                
-                # Send all stocks table to Telegram
-                if send_table_to_telegram(final_data):
-                    logger.info("Successfully sent all stocks table to Telegram")
-                else:
-                    logger.error("Failed to send all stocks table to Telegram")
-                
-                # Send buy recommendations table to Telegram
-                if send_table_to_telegram(final_data, 'buy'):
-                    logger.info("Successfully sent buy recommendations table to Telegram")
-                else:
-                    logger.error("Failed to send buy recommendations table to Telegram")
-                
-                # Send sell recommendations table to Telegram
-                if send_table_to_telegram(final_data, 'sell'):
-                    logger.info("Successfully sent sell recommendations table to Telegram")
-                else:
-                    logger.error("Failed to send sell recommendations table to Telegram")
-                
-            else:
-                logger.warning("No stock data available from CSV")
-            
-            # Wait for next check
-            logger.info(f"Waiting {CHECK_INTERVAL} seconds until next check")
-            time.sleep(CHECK_INTERVAL)
-            
-        except KeyboardInterrupt:
-            logger.info("Data update thread stopped")
-            break
-        except Exception as e:
-            logger.error(f"Unexpected error in data update thread: {e}")
-            # Wait a bit before retrying to avoid tight loop if persistent error
-            time.sleep(60)
+        schedule.run_pending()
+        time.sleep(60)  # Check every minute
+
+def job_wrapper(job_func):
+    """Wrapper for scheduled jobs to handle exceptions"""
+    try:
+        return job_func()
+    except Exception as e:
+        print(f"Error in scheduled job {job_func.__name__}: {e}")
+        error_message = f"❌ Error in {job_func.__name__}: {e}"
+        send_telegram_message(error_message)  # Will send to both personal chat and group
 
 # Flask routes
 @app.route('/')
-def home():
-    """Render the home page with recommendations"""
-    return render_template('index.html', 
-                          buy_recommendations=latest_data["buy_recommendations"],
-                          sell_recommendations=latest_data["sell_recommendations"],
-                          all_stocks=latest_data["all_stocks"],
-                          last_updated=latest_data["last_updated"])
+def index():
+    """Main page that displays recommendations"""
+    return render_template('index.html')
 
 @app.route('/api/recommendations')
 def api_recommendations():
-    """API endpoint to get the latest recommendations as JSON"""
+    """API endpoint to get current recommendations"""
     return jsonify({
-        'buy_recommendations': latest_data["buy_recommendations"],
-        'sell_recommendations': latest_data["sell_recommendations"],
-        'all_stocks': latest_data["all_stocks"],
-        'last_updated': latest_data["last_updated"]
+        'last_update': last_update_time,
+        'recommendations': current_recommendations
     })
 
-# Create HTML templates directory
-os.makedirs('templates', exist_ok=True)
+@app.route('/api/daily')
+def api_daily():
+    """API endpoint to get daily analysis"""
+    return jsonify(daily_analysis)
 
-# Create index.html template
-with open('templates/index.html', 'w') as f:
-    f.write('''
+def run_flask():
+    """Run Flask app in a separate thread"""
+    app.run(host='0.0.0.0', port=int(os.environ.get('PORT', 8080)))
+
+def main():
+    """Main function to run the stock analyzer"""
+    # Create directories if they don't exist
+    os.makedirs('static', exist_ok=True)
+    os.makedirs(TEMPLATES_DIR, exist_ok=True)
+    
+    # Create basic HTML template if it doesn't exist
+    index_template_path = os.path.join(TEMPLATES_DIR, 'index.html')
+    if not os.path.exists(index_template_path):
+        with open(index_template_path, 'w') as f:
+            f.write('''
 <!DOCTYPE html>
 <html lang="en">
 <head>
     <meta charset="UTF-8">
     <meta name="viewport" content="width=device-width, initial-scale=1.0">
-    <title>Multi-Timeframe Stock Analysis</title>
-    <link href="https://cdn.jsdelivr.net/npm/bootstrap@5.3.0/dist/css/bootstrap.min.css" rel="stylesheet">
-    <link rel="stylesheet" href="https://cdn.jsdelivr.net/npm/bootstrap-icons@1.10.0/font/bootstrap-icons.css">
+    <title>Nifty 50 Stock Analyzer</title>
+    <link href="https://cdn.jsdelivr.net/npm/bootstrap@5.1.3/dist/css/bootstrap.min.css" rel="stylesheet">
+    <script src="https://cdn.jsdelivr.net/npm/chart.js"></script>
     <style>
-        body { padding-top: 20px; padding-bottom: 30px; }
-        .table-responsive { margin-top: 20px; overflow-x: auto; }
-        .up { color: green; }
-        .down { color: red; }
-        .neutral { color: #6c757d; }
-        .last-updated { font-style: italic; font-size: 0.9rem; margin-bottom: 15px; }
-        .overbought { background-color: rgba(255, 0, 0, 0.1); }
-        .oversold { background-color: rgba(0, 128, 0, 0.1); }
-        .high-adx { background-color: rgba(0, 0, 255, 0.1); }
-        .strength-indicator {
-            display: inline-block;
-            width: 70px;
-            height: 8px;
-            background-color: #e9ecef;
-            border-radius: 4px;
-            overflow: hidden;
-        }
-        .strength-indicator-bar-buy {
-            height: 100%;
-            background-color: green;
-            border-radius: 4px;
-        }
-        .strength-indicator-bar-sell {
-            height: 100%;
-            background-color: red;
-            border-radius: 4px;
-        }
-        .strength-indicator-bar-neutral {
-            height: 100%;
-            background-color: #6c757d;
-            border-radius: 4px;
-        }
-        .refresh-button {
-            margin-bottom: 15px;
-        }
-        .tab-content {
-            padding-top: 20px;
-        }
-        .nav-pills .nav-link.active {
-            background-color: #0d6efd;
-        }
-        .nav-pills .nav-link {
-            color: #0d6efd;
-        }
-        .recommendation-badge {
-            font-size: 0.75rem;
-            padding: 2px 6px;
-            margin-left: 5px;
-            vertical-align: middle;
-            border-radius: 10px;
-            white-space: nowrap;
-        }
-        .buy-badge {
-            background-color: rgba(0, 128, 0, 0.2);
-            color: green;
-        }
-        .strong-buy-badge {
-            background-color: rgba(0, 128, 0, 0.4);
-            color: green;
-        }
-        .sell-badge { 
-            background-color: rgba(255, 0, 0, 0.2);
-            color: red;
-        }
-        .strong-sell-badge { 
-            background-color: rgba(255, 0, 0, 0.4);
-            color: red;
-        }
-        .neutral-badge { 
-            background-color: rgba(108, 117, 125, 0.2);
-            color: #6c757d;
-        }
-        .timeframe-header {
-            background-color: #f8f9fa;
-            font-size: 0.8rem;
-            text-align: center;
-        }
-        .table th {
-            position: sticky;
-            top: 0;
-            background-color: #fff;
-            z-index: 1;
-        }
-        .search-container {
-            margin-bottom: 15px;
-        }
-        .table td, .table th {
-            font-size: 0.85rem;
-            padding: 0.5rem;
-        }
-        .sub-header {
-            background-color: #e9ecef;
-            font-weight: normal;
-            font-size: 0.75rem;
-            text-align: center;
-        }
-        .legend {
-            display: flex;
-            flex-wrap: wrap;
-            gap: 10px;
-            margin-top: 15px;
-            font-size: 0.8rem;
-        }
-        .legend-item {
-            display: flex;
-            align-items: center;
-            margin-right: 10px;
-        }
-        .legend-color {
-            width: 15px;
-            height: 15px;
-            margin-right: 5px;
-            border-radius: 3px;
-        }
-        .scrollable-table {
-            max-height: 600px;
-            overflow-y: auto;
-        }
+        .recommendation-buy { color: green; font-weight: bold; }
+        .recommendation-sell { color: red; font-weight: bold; }
+        .recommendation-hold { color: orange; }
+        .card { margin-bottom: 20px; }
+        .last-update { font-style: italic; color: #666; }
     </style>
 </head>
 <body>
-    <div class="container">
-        <h1 class="text-center mb-3">Multi-Timeframe Stock Analysis</h1>
+    <div class="container mt-4">
+        <h1 class="mb-4">Nifty 50 Stock Analyzer</h1>
         
         <div class="row">
+            <div class="col-md-12">
+                <div class="card">
+                    <div class="card-header">
+                        <h5>Current Recommendations</h5>
+                        <p class="last-update" id="lastUpdate">Last updated: Loading...</p>
+                    </div>
+                    <div class="card-body">
+                        <div class="table-responsive">
+                            <table class="table table-striped table-hover">
+                                <thead>
+                                    <tr>
+                                        <th>Symbol</th>
+                                        <th>Price</th>
+                                        <th>Overall</th>
+                                        <th>SMA 20</th>
+                                        <th>SMA 50</th>
+                                        <th>MA Cross</th>
+                                        <th>MACD</th>
+                                        <th>RSI</th>
+                                        <th>Bollinger</th>
+                                        <th>Stochastic</th>
+                                        <th>ADX</th>
+                                    </tr>
+                                </thead>
+                                <tbody id="recommendationsTable">
+                                    <tr>
+                                        <td colspan="11" class="text-center">Loading recommendations...</td>
+                                    </tr>
+                                </tbody>
+                            </table>
+                        </div>
+                    </div>
+                </div>
+            </div>
+        </div>
+        
+        <div class="row mt-4">
             <div class="col-md-6">
-                <div class="last-updated" id="lastUpdated">
-                    {% if last_updated %}
-                        Last updated: {{ last_updated }}
-                    {% else %}
-                        Last updated: Not available
-                    {% endif %}
+                <div class="card">
+                    <div class="card-header">
+                        <h5>Daily Analysis</h5>
+                        <p class="last-update" id="dailyAnalysisDate">Date: Loading...</p>
+                    </div>
+                    <div class="card-body">
+                        <h6>BUY Recommendations</h6>
+                        <ul id="buyList">
+                            <li>Loading...</li>
+                        </ul>
+                        
+                        <h6>SELL Recommendations</h6>
+                        <ul id="sellList">
+                            <li>Loading...</li>
+                        </ul>
+                        
+                        <p id="holdCount">HOLD Recommendations: Loading...</p>
+                    </div>
                 </div>
             </div>
-            <div class="col-md-6 text-end">
-                <button id="refreshBtn" class="btn btn-primary refresh-button">
-                    <i class="bi bi-arrow-clockwise"></i> Refresh
-                </button>
+            
+            <div class="col-md-6">
+                <div class="card">
+                    <div class="card-header">
+                        <h5>Market Stats</h5>
+                    </div>
+                    <div class="card-body">
+                        <canvas id="recommendationChart" width="400" height="300"></canvas>
+                    </div>
+                </div>
             </div>
         </div>
-        
-        <ul class="nav nav-pills mb-3" id="pills-tab" role="tablist">
-            <li class="nav-item" role="presentation">
-                <button class="nav-link active" id="pills-all-tab" data-bs-toggle="pill" data-bs-target="#pills-all" type="button" role="tab" aria-controls="pills-all" aria-selected="true">All Stocks</button>
-            </li>
-            <li class="nav-item" role="presentation">
-                <button class="nav-link" id="pills-buy-tab" data-bs-toggle="pill" data-bs-target="#pills-buy" type="button" role="tab" aria-controls="pills-buy" aria-selected="false">Buy Recommendations</button>
-            </li>
-            <li class="nav-item" role="presentation">
-                <button class="nav-link" id="pills-sell-tab" data-bs-toggle="pill" data-bs-target="#pills-sell" type="button" role="tab" aria-controls="pills-sell" aria-selected="false">Sell Recommendations</button>
-            </li>
-        </ul>
-        
-        <div class="tab-content" id="pills-tabContent">
-            <!-- All Stocks Tab -->
-            <div class="tab-pane fade show active" id="pills-all" role="tabpanel" aria-labelledby="pills-all-tab">
-                <div class="search-container">
-                    <input type="text" id="searchAllStocks" class="form-control" placeholder="Search by symbol...">
-                </div>
-                
-                {% if all_stocks %}
-                    <div class="scrollable-table">
-                        <div class="table-responsive">
-                            <table class="table table-striped table-hover table-sm" id="allStocksTable">
-                                <thead>
-                                    <tr>
-                                        <th rowspan="2">Symbol</th>
-                                        <th rowspan="2">CMP (₹)</th>
-                                        <th rowspan="2">Change (%)</th>
-                                        <th rowspan="2">Recommendation</th>
-                                        <th rowspan="2">Signal</th>
-                                        <th rowspan="2">Target (₹)</th>
-                                        <th colspan="3" class="timeframe-header">RSI</th>
-                                        <th colspan="3" class="timeframe-header">ADX</th>
-                                    </tr>
-                                    <tr class="sub-header">
-                                        <th>Daily</th>
-                                        <th>Weekly</th>
-                                        <th>Monthly</th>
-                                        <th>Daily</th>
-                                        <th>Weekly</th>
-                                        <th>Monthly</th>
-                                    </tr>
-                                </thead>
-                                <tbody>
-                                    {% for stock in all_stocks %}
-                                        <tr>
-                                            <td>{{ stock.symbol }}</td>
-                                            <td>{{ "%.2f"|format(stock.close|default(0)) }}</td>
-                                            <td class="{% if stock.change_percent > 0 %}up{% elif stock.change_percent < 0 %}down{% else %}neutral{% endif %}">
-                                                {{ "%.2f"|format(stock.change_percent|default(0)) }}%
-                                            </td>
-                                            <td>
-                                                {% if stock.recommendation == 'STRONG BUY' %}
-                                                    <span class="recommendation-badge strong-buy-badge">STRONG BUY</span>
-                                                {% elif stock.recommendation == 'BUY' %}
-                                                    <span class="recommendation-badge buy-badge">BUY</span>
-                                                {% elif stock.recommendation == 'STRONG SELL' %}
-                                                    <span class="recommendation-badge strong-sell-badge">STRONG SELL</span>
-                                                {% elif stock.recommendation == 'SELL' %}
-                                                    <span class="recommendation-badge sell-badge">SELL</span>
-                                                {% else %}
-                                                    <span class="recommendation-badge neutral-badge">NEUTRAL</span>
-                                                {% endif %}
-                                            </td>
-                                            <td>
-                                                {% if 'BUY' in stock.recommendation %}
-                                                    <div class="strength-indicator">
-                                                        <div class="strength-indicator-bar-buy" style="width: {{ (stock.signal_strength|default(0))*10 }}%;"></div>
-                                                    </div>
-                                                {% elif 'SELL' in stock.recommendation %}
-                                                    <div class="strength-indicator">
-                                                        <div class="strength-indicator-bar-sell" style="width: {{ (stock.signal_strength|default(0))*10 }}%;"></div>
-                                                    </div>
-                                                {% else %}
-                                                    <div class="strength-indicator">
-                                                        <div class="strength-indicator-bar-neutral" style="width: {{ (stock.signal_strength|default(0))*10 }}%;"></div>
-                                                    </div>
-                                                {% endif %}
-                                                <span class="ms-1">{{ stock.signal_strength|default(0) }}</span>
-                                            </td>
-                                            <td>{{ "%.2f"|format(stock.target_price|default(0)) }}</td>
-                                            <td class="{% if stock.daily_rsi < 30 %}oversold{% elif stock.daily_rsi > 70 %}overbought{% endif %}">
-                                                {{ stock.daily_rsi|default('N/A') }}
-                                            </td>
-                                            <td class="{% if stock.weekly_rsi < 30 %}oversold{% elif stock.weekly_rsi > 70 %}overbought{% endif %}">
-                                                {{ stock.weekly_rsi|default('N/A') }}
-                                            </td>
-                                            <td class="{% if stock.monthly_rsi < 30 %}oversold{% elif stock.monthly_rsi > 70 %}overbought{% endif %}">
-                                                {{ stock.monthly_rsi|default('N/A') }}
-                                            </td>
-                                            <td class="{% if stock.daily_adx > 25 %}high-adx{% endif %}">
-                                                {{ stock.daily_adx|default('N/A') }}
-                                            </td>
-                                            <td class="{% if stock.weekly_adx > 25 %}high-adx{% endif %}">
-                                                {{ stock.weekly_adx|default('N/A') }}
-                                            </td>
-                                            <td class="{% if stock.monthly_adx > 25 %}high-adx{% endif %}">
-                                                {{ stock.monthly_adx|default('N/A') }}
-                                            </td>
-                                        </tr>
-                                    {% endfor %}
-                                </tbody>
-                            </table>
-                        </div>
-                    </div>
-                {% else %}
-                    <div class="alert alert-warning">
-                        No stock data available. Please make sure the CSV file is populated.
-                    </div>
-                {% endif %}
-
-                <div class="legend">
-                    <div class="legend-item">
-                        <div class="legend-color" style="background-color: rgba(0, 128, 0, 0.1);"></div>
-                        <span>Oversold (RSI < 30)</span>
-                    </div>
-                    <div class="legend-item">
-                        <div class="legend-color" style="background-color: rgba(255, 0, 0, 0.1);"></div>
-                        <span>Overbought (RSI > 70)</span>
-                    </div>
-                    <div class="legend-item">
-                        <div class="legend-color" style="background-color: rgba(0, 0, 255, 0.1);"></div>
-                        <span>Strong Trend (ADX > 25)</span>
-                    </div>
-                </div>
-            </div>
-
-            <!-- Buy Recommendations Tab -->
-            <div class="tab-pane fade" id="pills-buy" role="tabpanel" aria-labelledby="pills-buy-tab">
-                <div class="search-container">
-                    <input type="text" id="searchBuyRecs" class="form-control" placeholder="Search by symbol...">
-                </div>
-
-                {% if buy_recommendations %}
-                    <div class="scrollable-table">
-                        <div class="table-responsive">
-                            <table class="table table-striped table-hover table-sm" id="buyRecsTable">
-                                <thead>
-                                    <tr>
-                                        <th rowspan="2">Symbol</th>
-                                        <th rowspan="2">CMP (₹)</th>
-                                        <th rowspan="2">Change (%)</th>
-                                        <th rowspan="2">Recommendation</th>
-                                        <th rowspan="2">Signal</th>
-                                        <th rowspan="2">Target (₹)</th>
-                                        <th colspan="3" class="timeframe-header">RSI</th>
-                                        <th colspan="3" class="timeframe-header">ADX</th>
-                                    </tr>
-                                    <tr class="sub-header">
-                                        <th>Daily</th>
-                                        <th>Weekly</th>
-                                        <th>Monthly</th>
-                                        <th>Daily</th>
-                                        <th>Weekly</th>
-                                        <th>Monthly</th>
-                                    </tr>
-                                </thead>
-                                <tbody>
-                                    {% for stock in buy_recommendations %}
-                                        <tr>
-                                            <td>{{ stock.symbol }}</td>
-                                            <td>{{ "%.2f"|format(stock.close|default(0)) }}</td>
-                                            <td class="{% if stock.change_percent > 0 %}up{% elif stock.change_percent < 0 %}down{% else %}neutral{% endif %}">
-                                                {{ "%.2f"|format(stock.change_percent|default(0)) }}%
-                                            </td>
-                                            <td>
-                                                {% if stock.recommendation == 'STRONG BUY' %}
-                                                    <span class="recommendation-badge strong-buy-badge">STRONG BUY</span>
-                                                {% elif stock.recommendation == 'BUY' %}
-                                                    <span class="recommendation-badge buy-badge">BUY</span>
-                                                {% endif %}
-                                            </td>
-                                            <td>
-                                                <div class="strength-indicator">
-                                                    <div class="strength-indicator-bar-buy" style="width: {{ (stock.signal_strength|default(0))*10 }}%;"></div>
-                                                </div>
-                                                <span class="ms-1">{{ stock.signal_strength|default(0) }}</span>
-                                            </td>
-                                            <td>{{ "%.2f"|format(stock.target_price|default(0)) }}</td>
-                                            <td class="{% if stock.daily_rsi < 30 %}oversold{% elif stock.daily_rsi > 70 %}overbought{% endif %}">
-                                                {{ stock.daily_rsi|default('N/A') }}
-                                            </td>
-                                            <td class="{% if stock.weekly_rsi < 30 %}oversold{% elif stock.weekly_rsi > 70 %}overbought{% endif %}">
-                                                {{ stock.weekly_rsi|default('N/A') }}
-                                            </td>
-                                            <td class="{% if stock.monthly_rsi < 30 %}oversold{% elif stock.monthly_rsi > 70 %}overbought{% endif %}">
-                                                {{ stock.monthly_rsi|default('N/A') }}
-                                            </td>
-                                            <td class="{% if stock.daily_adx > 25 %}high-adx{% endif %}">
-                                                {{ stock.daily_adx|default('N/A') }}
-                                            </td>
-                                            <td class="{% if stock.weekly_adx > 25 %}high-adx{% endif %}">
-                                                {{ stock.weekly_adx|default('N/A') }}
-                                            </td>
-                                            <td class="{% if stock.monthly_adx > 25 %}high-adx{% endif %}">
-                                                {{ stock.monthly_adx|default('N/A') }}
-                                            </td>
-                                        </tr>
-                                    {% endfor %}
-                                </tbody>
-                            </table>
-                        </div>
-                    </div>
-                {% else %}
-                    <div class="alert alert-info">
-                        No buy recommendations available at this time.
-                    </div>
-                {% endif %}
-            </div>
-
-            <!-- Sell Recommendations Tab -->
-            <div class="tab-pane fade" id="pills-sell" role="tabpanel" aria-labelledby="pills-sell-tab">
-                <div class="search-container">
-                    <input type="text" id="searchSellRecs" class="form-control" placeholder="Search by symbol...">
-                </div>
-
-                {% if sell_recommendations %}
-                    <div class="scrollable-table">
-                        <div class="table-responsive">
-                            <table class="table table-striped table-hover table-sm" id="sellRecsTable">
-                                <thead>
-                                    <tr>
-                                        <th rowspan="2">Symbol</th>
-                                        <th rowspan="2">CMP (₹)</th>
-                                        <th rowspan="2">Change (%)</th>
-                                        <th rowspan="2">Recommendation</th>
-                                        <th rowspan="2">Signal</th>
-                                        <th rowspan="2">Target (₹)</th>
-                                        <th colspan="3" class="timeframe-header">RSI</th>
-                                        <th colspan="3" class="timeframe-header">ADX</th>
-                                    </tr>
-                                    <tr class="sub-header">
-                                        <th>Daily</th>
-                                        <th>Weekly</th>
-                                        <th>Monthly</th>
-                                        <th>Daily</th>
-                                        <th>Weekly</th>
-                                        <th>Monthly</th>
-                                    </tr>
-                                </thead>
-                                <tbody>
-                                    {% for stock in sell_recommendations %}
-                                        <tr>
-                                            <td>{{ stock.symbol }}</td>
-                                            <td>{{ "%.2f"|format(stock.close|default(0)) }}</td>
-                                            <td class="{% if stock.change_percent > 0 %}up{% elif stock.change_percent < 0 %}down{% else %}neutral{% endif %}">
-                                                {{ "%.2f"|format(stock.change_percent|default(0)) }}%
-                                            </td>
-                                            <td>
-                                                {% if stock.recommendation == 'STRONG SELL' %}
-                                                    <span class="recommendation-badge strong-sell-badge">STRONG SELL</span>
-                                                {% elif stock.recommendation == 'SELL' %}
-                                                    <span class="recommendation-badge sell-badge">SELL</span>
-                                                {% endif %}
-                                            </td>
-                                            <td>
-                                                <div class="strength-indicator">
-                                                    <div class="strength-indicator-bar-sell" style="width: {{ (stock.signal_strength|default(0))*10 }}%;"></div>
-                                                </div>
-                                                <span class="ms-1">{{ stock.signal_strength|default(0) }}</span>
-                                            </td>
-                                            <td>{{ "%.2f"|format(stock.target_price|default(0)) }}</td>
-                                            <td class="{% if stock.daily_rsi < 30 %}oversold{% elif stock.daily_rsi > 70 %}overbought{% endif %}">
-                                                {{ stock.daily_rsi|default('N/A') }}
-                                            </td>
-                                            <td class="{% if stock.weekly_rsi < 30 %}oversold{% elif stock.weekly_rsi > 70 %}overbought{% endif %}">
-                                                {{ stock.weekly_rsi|default('N/A') }}
-                                            </td>
-                                            <td class="{% if stock.monthly_rsi < 30 %}oversold{% elif stock.monthly_rsi > 70 %}overbought{% endif %}">
-                                                {{ stock.monthly_rsi|default('N/A') }}
-                                            </td>
-                                            <td class="{% if stock.daily_adx > 25 %}high-adx{% endif %}">
-                                                {{ stock.daily_adx|default('N/A') }}
-                                            </td>
-                                            <td class="{% if stock.weekly_adx > 25 %}high-adx{% endif %}">
-                                                {{ stock.weekly_adx|default('N/A') }}
-                                            </td>
-                                            <td class="{% if stock.monthly_adx > 25 %}high-adx{% endif %}">
-                                                {{ stock.monthly_adx|default('N/A') }}
-                                            </td>
-                                        </tr>
-                                    {% endfor %}
-                                </tbody>
-                            </table>
-                        </div>
-                    </div>
-                {% else %}
-                    <div class="alert alert-info">
-                        No sell recommendations available at this time.
-                    </div>
-                {% endif %}
-            </div>
-        </div>
-
-        <footer class="text-center mt-4">
-            <p class="text-muted">
-                &copy; 2025 Stock Analysis Bot. This analysis is for informational purposes only. Not financial advice.
-            </p>
-        </footer>
-
     </div>
-
-    <script src="https://cdn.jsdelivr.net/npm/bootstrap@5.3.0/dist/js/bootstrap.bundle.min.js"></script>
+    
     <script>
-        document.addEventListener('DOMContentLoaded', function() {
-            // Refresh button
-            document.getElementById('refreshBtn').addEventListener('click', function() {
-                location.reload();
-            });
+        let recommendationChart;
+        
+        // Function to update recommendations
+        function updateRecommendations() {
+            fetch('/api/recommendations')
+                .then(response => response.json())
+                .then(data => {
+                    const tableBody = document.getElementById('recommendationsTable');
+                    const lastUpdate = document.getElementById('lastUpdate');
+                    
+                    if (data.last_update) {
+                        lastUpdate.textContent = `Last updated: ${data.last_update}`;
+                    }
+                    
+                    if (data.recommendations && data.recommendations.length > 0) {
+                        tableBody.innerHTML = '';
+                        
+                        data.recommendations.forEach(rec => {
+                            const row = document.createElement('tr');
+                            
+                            // Add cells
+                            row.innerHTML = `
+                                <td>${rec.symbol}</td>
+                                <td>₹${rec.price}</td>
+                                <td class="recommendation-${rec.recommendations.OVERALL.toLowerCase()}">${rec.recommendations.OVERALL}</td>
+                                <td class="recommendation-${rec.recommendations.SMA_20.toLowerCase()}">${rec.recommendations.SMA_20}</td>
+                                <td class="recommendation-${rec.recommendations.SMA_50.toLowerCase()}">${rec.recommendations.SMA_50}</td>
+                                <td class="recommendation-${(rec.recommendations.MA_Cross || rec.recommendations.Golden_Cross || rec.recommendations.Death_Cross || 'HOLD').toLowerCase()}">${rec.recommendations.MA_Cross || rec.recommendations.Golden_Cross || rec.recommendations.Death_Cross || 'HOLD'}</td>
+                                <td class="recommendation-${rec.recommendations.MACD.toLowerCase()}">${rec.recommendations.MACD}</td>
+                                <td class="recommendation-${rec.recommendations.RSI.toLowerCase()}">${rec.recommendations.RSI}</td>
+                                <td class="recommendation-${rec.recommendations.Bollinger.toLowerCase()}">${rec.recommendations.Bollinger}</td>
+                                <td class="recommendation-${rec.recommendations.Stochastic.toLowerCase()}">${rec.recommendations.Stochastic}</td>
+                                <td>${rec.recommendations.ADX}</td>
+                            `;
+                            
+                            tableBody.appendChild(row);
+                        });
+                    }
+                })
+                .catch(error => {
+                    console.error('Error fetching recommendations:', error);
+                });
+        }
+        
+        // Function to update daily analysis
+        function updateDailyAnalysis() {
+            fetch('/api/daily')
+                .then(response => response.json())
+                .then(data => {
+                    const buyList = document.getElementById('buyList');
+                    const sellList = document.getElementById('sellList');
+                    const holdCount = document.getElementById('holdCount');
+                    const dailyAnalysisDate = document.getElementById('dailyAnalysisDate');
+                    
+                    if (data.date) {
+                        dailyAnalysisDate.textContent = `Date: ${data.date}`;
+                        
+                        // Update BUY list
+                        buyList.innerHTML = '';
+                        if (data.buy && data.buy.length > 0) {
+                            data.buy.slice(0, 10).forEach((item, index) => {
+                                const li = document.createElement('li');
+                                li.innerHTML = `<strong>${item.symbol}</strong> at ₹${item.price} (Target: ₹${item.target_price}) - Strength: ${item.strength}`;
+                                buyList.appendChild(li);
+                            });
+                        } else {
+                            buyList.innerHTML = '<li>No BUY recommendations today</li>';
+                        }
+                        
+                        // Update SELL list
+                        sellList.innerHTML = '';
+                        if (data.sell && data.sell.length > 0) {
+                            data.sell.slice(0, 10).forEach((item, index) => {
+                                const li = document.createElement('li');
+                                li.innerHTML = `<strong>${item.symbol}</strong> at ₹${item.price} (Target: ₹${item.target_price}) - Strength: ${item.strength}`;
+                                sellList.appendChild(li);
+                            });
+                        } else {
+                            sellList.innerHTML = '<li>No SELL recommendations today</li>';
+                        }
+                        
+                        // Update HOLD count
+                        holdCount.textContent = `HOLD Recommendations: ${data.hold || 0} stocks`;
+                        
+                        // Update chart
+                        updateChart(data);
+                    }
+                })
+                .catch(error => {
+                    console.error('Error fetching daily analysis:', error);
+                });
+        }
+        
+        // Function to update chart
+        function updateChart(data) {
+            const ctx = document.getElementById('recommendationChart').getContext('2d');
             
-            // Search functionality for All Stocks table
-            document.getElementById('searchAllStocks').addEventListener('input', function() {
-                filterTable('allStocksTable', this.value);
-            });
+            if (recommendationChart) {
+                recommendationChart.destroy();
+            }
             
-            // Search functionality for Buy Recommendations table
-            document.getElementById('searchBuyRecs').addEventListener('input', function() {
-                filterTable('buyRecsTable', this.value);
-            });
-            
-            // Search functionality for Sell Recommendations table
-            document.getElementById('searchSellRecs').addEventListener('input', function() {
-                filterTable('sellRecsTable', this.value);
-            });
-            
-            function filterTable(tableId, query) {
-                query = query.toLowerCase();
-                const table = document.getElementById(tableId);
-                if (!table) return;
-                
-                const rows = table.getElementsByTagName('tbody')[0].getElementsByTagName('tr');
-                
-                for (let i = 0; i < rows.length; i++) {
-                    const symbol = rows[i].getElementsByTagName('td')[0].textContent.toLowerCase();
-                    if (symbol.includes(query)) {
-                        rows[i].style.display = '';
-                    } else {
-                        rows[i].style.display = 'none';
+            recommendationChart = new Chart(ctx, {
+                type: 'pie',
+                data: {
+                    labels: ['BUY', 'SELL', 'HOLD'],
+                    datasets: [{
+                        label: 'Recommendations',
+                        data: [
+                            data.buy ? data.buy.length : 0,
+                            data.sell ? data.sell.length : 0,
+                            data.hold || 0
+                        ],
+                        backgroundColor: [
+                            'rgba(75, 192, 192, 0.6)',
+                            'rgba(255, 99, 132, 0.6)',
+                            'rgba(255, 206, 86, 0.6)'
+                        ],
+                        borderColor: [
+                            'rgba(75, 192, 192, 1)',
+                            'rgba(255, 99, 132, 1)',
+                            'rgba(255, 206, 86, 1)'
+                        ],
+                        borderWidth: 1
+                    }]
+                },
+                options: {
+                    responsive: true,
+                    plugins: {
+                        legend: {
+                            position: 'bottom',
+                        },
+                        title: {
+                            display: true,
+                            text: 'Recommendation Distribution'
+                        }
                     }
                 }
-            }
-        });
+            });
+        }
+        
+        // Initial update
+        updateRecommendations();
+        updateDailyAnalysis();
+        
+        // Update every 5 minutes
+        setInterval(updateRecommendations, 300000);
+        setInterval(updateDailyAnalysis, 300000);
     </script>
 </body>
 </html>
-'''
+            ''')
+    
+    # Create example CSV file if it doesn't exist
+    if not os.path.exists(CSV_FILE_PATH):
+        with open(CSV_FILE_PATH, 'w') as f:
+            f.write("symbol,name,sector\n")
+            f.write("RELIANCE,Reliance Industries,Energy\n")
+            f.write("TCS,Tata Consultancy Services,IT\n")
+            f.write("HDFCBANK,HDFC Bank,Banking\n")
+            f.write("INFY,Infosys,IT\n")
+            f.write("ICICIBANK,ICICI Bank,Banking\n")
+            f.write("HINDUNILVR,Hindustan Unilever,FMCG\n")
+            f.write("SBIN,State Bank of India,Banking\n")
+            f.write("BHARTIARTL,Bharti Airtel,Telecom\n")
+            f.write("ITC,ITC,FMCG\n")
+            f.write("KOTAKBANK,Kotak Mahindra Bank,Banking\n")
+    
+    # Send startup message
+    startup_message = (
+        "*📈 Nifty 50 Stock Analyzer Started 📉*\n\n"
+        f"Bot started at {datetime.datetime.now(IST_TIMEZONE).strftime('%Y-%m-%d %H:%M:%S')}\n"
+        f"Market hours: {MARKET_OPEN_TIME} - {MARKET_CLOSE_TIME} IST\n"
+        f"Check interval: Every {CHECK_INTERVAL_MINUTES} minutes during market hours\n\n"
+        "The bot will send recommendations during market hours and a daily summary after market close."
     )
-
-# Main function to start the application
-def main():
-    """Start the web server and data update thread"""
-    logger.info("Starting Stock Trading Bot with Multiple Timeframes")
+    send_telegram_message(startup_message)  # Will send to both personal chat and group
     
-    # Create CSV if not exists
-    create_csv_if_not_exists()
+    # Start Flask app in a separate thread
+    flask_thread = threading.Thread(target=run_flask)
+    flask_thread.daemon = True
+    flask_thread.start()
     
-    # Start data update thread
-    update_thread = threading.Thread(target=update_stock_data, daemon=True)
-    update_thread.start()
+    # Define Telegram bot handler
+    def handle_message(msg):
+        """Handle incoming Telegram messages"""
+        content_type, chat_type, chat_id = telepot.glance(msg)
+        
+        if content_type != 'text':
+            return
+        
+        command = msg['text'].lower()
+        
+        if command == '/start':
+            response = (
+                "*Welcome to Nifty 50 Stock Analyzer Bot!*\n\n"
+                "Available commands:\n"
+                "/status - Check bot status\n"
+                "/recommendations - Get current recommendations\n"
+                "/daily - Get daily analysis\n"
+                "/analyze <symbol> - Analyze a specific stock"
+            )
+            bot.sendMessage(chat_id, response, parse_mode='Markdown')
+        
+        elif command == '/status':
+            status = (
+                "*Bot Status*\n\n"
+                f"Current time: {datetime.datetime.now(IST_TIMEZONE).strftime('%Y-%m-%d %H:%M:%S')} IST\n"
+                f"Market hours: {MARKET_OPEN_TIME} - {MARKET_CLOSE_TIME} IST\n"
+                f"Market is currently {'OPEN' if is_market_hours() else 'CLOSED'}\n"
+                f"Last analysis update: {last_update_time or 'Not yet run'}\n"
+                f"Number of stocks being monitored: {len(load_stock_data()) if not load_stock_data().empty else 0}\n"
+                f"Check interval: Every {CHECK_INTERVAL_MINUTES} minutes during market hours"
+            )
+            bot.sendMessage(chat_id, status, parse_mode='Markdown')
+        
+        elif command == '/recommendations':
+            if not current_recommendations:
+                bot.sendMessage(chat_id, "No recommendations available yet. Please wait for the next analysis run.", parse_mode='Markdown')
+                return
+                
+            # Get BUY and SELL recommendations only
+            buy_sell_recs = [r for r in current_recommendations if r.get('recommendations', {}).get('OVERALL') in ['BUY', 'SELL']]
+            
+            if not buy_sell_recs:
+                bot.sendMessage(chat_id, "No BUY or SELL recommendations in the latest analysis.", parse_mode='Markdown')
+                return
+                
+            response = f"*Latest Recommendations ({last_update_time})*\n\n"
+            
+            for rec in buy_sell_recs:
+                response += f"*{rec['symbol']} - {rec['recommendations']['OVERALL']}*\n"
+                response += f"Price: ₹{rec['price']}\n"
+                response += f"Target: ₹{rec['target_price']}\n"
+                response += f"Stop Loss: ₹{rec['stop_loss']}\n\n"
+                
+            bot.sendMessage(chat_id, response, parse_mode='Markdown')
+        
+        elif command == '/daily':
+            if not daily_analysis:
+                bot.sendMessage(chat_id, "No daily analysis available yet. It will be generated after market hours.", parse_mode='Markdown')
+                return
+                
+            # Format daily analysis message (same as what's sent automatically)
+            message = f"*Daily Market Analysis - {daily_analysis['date']}*\n\n"
+            
+            message += f"*BUY Recommendations ({len(daily_analysis['buy'])}):*\n"
+            for i, rec in enumerate(daily_analysis['buy'][:10], 1):
+                message += f"{i}. {rec['symbol']} at ₹{rec['price']} (Target: ₹{rec['target_price']}) - Strength: {rec['strength']}\n"
+            
+            message += f"\n*SELL Recommendations ({len(daily_analysis['sell'])}):*\n"
+            for i, rec in enumerate(daily_analysis['sell'][:10], 1):
+                message += f"{i}. {rec['symbol']} at ₹{rec['price']} (Target: ₹{rec['target_price']}) - Strength: {rec['strength']}\n"
+            
+            message += f"\n*HOLD Recommendations: {daily_analysis['hold']} stocks*"
+            
+            bot.sendMessage(chat_id, message, parse_mode='Markdown')
+        
+        elif command.startswith('/analyze '):
+            symbol = command.split(' ')[1].upper()
+            bot.sendMessage(chat_id, f"Analyzing {symbol}... Please wait.", parse_mode='Markdown')
+            
+            # Fetch and analyze the stock
+            stock_data = fetch_latest_data(symbol)
+            
+            if stock_data.empty:
+                bot.sendMessage(chat_id, f"❌ Error: Could not fetch data for {symbol}. Please verify the symbol is correct.", parse_mode='Markdown')
+                return
+                
+            stock_data = calculate_indicators(stock_data)
+            recommendations = get_recommendations(stock_data, symbol)
+            
+            # Format and send the message
+            message = format_recommendations_message(recommendations)
+            bot.sendMessage(chat_id, message, parse_mode='Markdown')
+            
+            # Create and send chart
+            fig = create_technical_chart(stock_data, symbol)
+            if fig:
+                chart_path = f"static/{symbol}_analysis.png"
+                pio.write_image(fig, chart_path)
+                with open(chart_path, 'rb') as photo:
+                    bot.sendPhoto(chat_id, photo, caption=f"Technical chart for {symbol}")
+        
+        else:
+            bot.sendMessage(chat_id, "Unknown command. Use /start to see available commands.", parse_mode='Markdown')
     
-    # Start web server
-    logger.info(f"Starting web server on port {WEB_PORT}")
-    app.run(host='0.0.0.0', port=WEB_PORT)
+    # Start the Telegram bot
+    MessageLoop(bot, handle_message).run_as_thread()
+    
+    # Calculate target prices and stop loss when generating recommendations
+    def calculate_price_targets(df, recommendations):
+        """Calculate target price and stop loss based on ATR and current trend"""
+        try:
+            latest = df.iloc[-1]
+            current_price = latest['close']
+            atr = latest['ATR']
+            
+            overall_rec = recommendations['recommendations']['OVERALL']
+            
+            # Calculate multipliers based on trend strength (ADX)
+            adx_value = latest['ADX']
+            if adx_value > 40:  # Very strong trend
+                multiplier = 3.0
+            elif adx_value > 25:  # Strong trend
+                multiplier = 2.5
+            else:  # Weak trend
+                multiplier = 2.0
+                
+            # Calculate target price and stop loss
+            if overall_rec == 'BUY':
+                target_price = round(current_price + (atr * multiplier), 2)
+                stop_loss = round(current_price - (atr * 1.5), 2)
+            elif overall_rec == 'SELL':
+                target_price = round(current_price - (atr * multiplier), 2)
+                stop_loss = round(current_price + (atr * 1.5), 2)
+            else:
+                target_price = round(current_price, 2)
+                stop_loss = round(current_price, 2)
+                
+            recommendations['target_price'] = target_price
+            recommendations['stop_loss'] = stop_loss
+            
+            return recommendations
+        except Exception as e:
+            print(f"Error calculating price targets: {e}")
+            recommendations['target_price'] = recommendations['price']
+            recommendations['stop_loss'] = recommendations['price']
+            return recommendations
+    
+    # Update the get_recommendations function to include target prices
+    def get_recommendations_with_targets(df, symbol):
+        """Enhanced version of get_recommendations that includes target prices"""
+        base_recommendations = get_recommendations(df, symbol)
+        return calculate_price_targets(df, base_recommendations)
+    
+    # Update the run_analysis function to use the enhanced recommendations
+    original_run_analysis = run_analysis
+    def enhanced_run_analysis():
+        """Enhanced version of run_analysis that includes target prices"""
+        global current_recommendations, last_update_time
+        
+        stocks_df = load_stock_data()
+        all_recommendations = []
+        
+        if stocks_df.empty:
+            message = "❌ Error: Could not load stock data."
+            send_telegram_message(message)
+            return
+        
+        print(f"Running analysis at {datetime.datetime.now(IST_TIMEZONE).strftime('%Y-%m-%d %H:%M:%S')}")
+        
+        # Process each stock
+        for _, row in stocks_df.iterrows():
+            symbol = row['symbol']
+            
+            # Fetch latest data
+            stock_data = fetch_latest_data(symbol)
+            
+            if stock_data.empty:
+                print(f"Skipping {symbol} due to data fetching error")
+                continue
+            
+            # Calculate technical indicators
+            stock_data = calculate_indicators(stock_data)
+            
+            # Generate recommendations with targets
+            recommendations = get_recommendations_with_targets(stock_data, symbol)
+            all_recommendations.append(recommendations)
+            
+            # If it's a significant recommendation (BUY or SELL), send individual notification
+            if recommendations.get('recommendations', {}).get('OVERALL') in ['BUY', 'SELL']:
+                message = format_recommendations_message(recommendations)
+                # Add target price and stop loss to the message
+                message += f"\n\nTarget Price: ₹{recommendations['target_price']}"
+                message += f"\nStop Loss: ₹{recommendations['stop_loss']}"
+                send_telegram_message(message)
+                
+                # Create and save chart
+                fig = create_technical_chart(stock_data, symbol)
+                if fig:
+                    chart_path = f"static/{symbol}_chart.png"
+                    pio.write_image(fig, chart_path)
+                    send_telegram_photo(chart_path, f"Technical chart for {symbol}")
+        
+        # Update global recommendations
+        current_recommendations = all_recommendations
+        last_update_time = datetime.datetime.now(IST_TIMEZONE).strftime('%Y-%m-%d %H:%M:%S')
+        
+        return all_recommendations
+    
+    # Replace original function with enhanced one
+    run_analysis = enhanced_run_analysis
+    
+    # Update the generate_daily_analysis function to include target prices
+    original_generate_daily_analysis = generate_daily_analysis
+    def enhanced_generate_daily_analysis():
+        """Enhanced version of generate_daily_analysis that includes target prices"""
+        global daily_analysis
+        
+        stocks_df = load_stock_data()
+        
+        if stocks_df.empty:
+            message = "❌ Error: Could not load stock data for daily analysis."
+            send_telegram_message(message)
+            return
+        
+        buy_recommendations = []
+        sell_recommendations = []
+        hold_recommendations = []
+        
+        # Run analysis for all stocks
+        for _, row in stocks_df.iterrows():
+            symbol = row['symbol']
+            stock_data = fetch_latest_data(symbol)
+            
+            if stock_data.empty:
+                continue
+                
+            stock_data = calculate_indicators(stock_data)
+            recommendations = get_recommendations_with_targets(stock_data, symbol)
+            
+            overall_rec = recommendations.get('recommendations', {}).get('OVERALL')
+            if overall_rec == 'BUY':
+                buy_recommendations.append({
+                    'symbol': symbol,
+                    'price': recommendations['price'],
+                    'target_price': recommendations['target_price'],
+                    'stop_loss': recommendations['stop_loss'],
+                    'strength': sum(1 for rec in recommendations['recommendations'].values() if rec == 'BUY')
+                })
+            elif overall_rec == 'SELL':
+                sell_recommendations.append({
+                    'symbol': symbol,
+                    'price': recommendations['price'],
+                    'target_price': recommendations['target_price'],
+                    'stop_loss': recommendations['stop_loss'],
+                    'strength': sum(1 for rec in recommendations['recommendations'].values() if rec == 'SELL')
+                })
+            else:
+                hold_recommendations.append({
+                    'symbol': symbol,
+                    'price': recommendations['price']
+                })
+        
+        # Sort by strength
+        buy_recommendations.sort(key=lambda x: x['strength'], reverse=True)
+        sell_recommendations.sort(key=lambda x: x['strength'], reverse=True)
+        
+        # Format the daily analysis message
+        now = datetime.datetime.now(IST_TIMEZONE)
+        message = f"*Daily Market Analysis - {now.strftime('%Y-%m-%d')}*\n\n"
+        
+        message += f"*BUY Recommendations ({len(buy_recommendations)}):*\n"
+        for i, rec in enumerate(buy_recommendations[:10], 1):
+            message += f"{i}. {rec['symbol']} at ₹{rec['price']} (Target: ₹{rec['target_price']}, SL: ₹{rec['stop_loss']}) - Strength: {rec['strength']}\n"
+        
+        message += f"\n*SELL Recommendations ({len(sell_recommendations)}):*\n"
+        for i, rec in enumerate(sell_recommendations[:10], 1):
+            message += f"{i}. {rec['symbol']} at ₹{rec['price']} (Target: ₹{rec['target_price']}, SL: ₹{rec['stop_loss']}) - Strength: {rec['strength']}\n"
+        
+        message += f"\n*HOLD Recommendations: {len(hold_recommendations)} stocks*"
+        
+        # Store daily analysis
+        daily_analysis = {
+            'date': now.strftime('%Y-%m-%d'),
+            'buy': buy_recommendations,
+            'sell': sell_recommendations,
+            'hold': len(hold_recommendations)
+        }
+        
+        # Send to Telegram
+        send_telegram_message(message)
+        
+        return daily_analysis
+    
+    # Replace original function with enhanced one
+    generate_daily_analysis = enhanced_generate_daily_analysis
+    
+    # Update format_recommendations_message to include target prices
+    original_format_recommendations_message = format_recommendations_message
+    def enhanced_format_recommendations_message(recommendations):
+        """Enhanced version of format_recommendations_message that includes target prices"""
+        msg = original_format_recommendations_message(recommendations)
+        
+        if 'target_price' in recommendations and 'stop_loss' in recommendations:
+            msg += f"\n\n*Target Price: ₹{recommendations['target_price']}*"
+            msg += f"\n*Stop Loss: ₹{recommendations['stop_loss']}*"
+        
+        return msg
+    
+    # Replace original function with enhanced one
+    format_recommendations_message = enhanced_format_recommendations_message
+    
+    # Start the scheduler
+    schedule_jobs()
 
 if __name__ == "__main__":
     main()
