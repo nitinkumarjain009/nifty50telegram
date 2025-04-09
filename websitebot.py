@@ -675,9 +675,9 @@ class ChartInkScraper:
     
 def save_recommendations(self):
      """Save recommendations to database and return new ones"""
-    new_recommendations = []
-    conn = sqlite3.connect('recommendations.db')
-    cursor = conn.cursor()
+        new_recommendations = []
+        conn = sqlite3.connect('recommendations.db')
+        cursor = conn.cursor()
     
     try:
         # Update last scan time for the site
