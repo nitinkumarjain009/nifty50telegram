@@ -674,4 +674,884 @@ class ChartInkScraper:
         return rec_type
     
     def save_recommendations(self):
-        """Save recommendations to database and return new ones"""
+    """Save recommendations to database and return new ones"""
+    new_recommendations = []
+    conn = sqlite3.connect('recommendations.db')
+    cursor = conn.cursor()
+    
+    try:
+        # Update last scan time for the site
+        cursor.execute(
+            "UPDATE sites SET last_scan = ? WHERE id = ?",
+            (datetime.now().strftime("%Y-%m-%d %H:%M:%S"), self.site_id)
+        )
+        
+        # Process and save each recommendation
+        for rec in self.recommendations:
+            try:
+                # Check if this recommendation already exists (by hash)
+                cursor.execute(
+                    "SELECT id FROM recommendations WHERE hash = ?", 
+                    (rec['hash'],)
+                )
+                existing = cursor.fetchone()
+                
+                if not existing:
+                    # Insert new recommendation
+                    cursor.execute('''
+                    INSERT INTO recommendations (
+                        site_id, sr_num, stock_name, symbol, links, 
+                        current_price, pct_change, volume, volume_sma, 
+                        vol_by_sma, market_cap, year_high, year_low, 
+                        pe_ratio, industry, recommendation_type, raw_data, hash
+                    ) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
+                    ''', (
+                        rec['site_id'], rec['sr_num'], rec['stock_name'], 
+                        rec['symbol'], rec['links'], rec['current_price'], 
+                        rec['pct_change'], rec['volume'], rec['volume_sma'], 
+                        rec['vol_by_sma'], rec['market_cap'], rec['year_high'], 
+                        rec['year_low'], rec['pe_ratio'], rec['industry'], 
+                        rec['recommendation_type'], rec['raw_data'], rec['hash']
+                    ))
+                    
+                    # Add to new recommendations list for notification
+                    new_recommendations.append(rec)
+                    logger.info(f"Added new recommendation: {rec['symbol']} - {rec['stock_name']}")
+            except Exception as e:
+                logger.error(f"Error saving recommendation {rec.get('symbol', 'unknown')}: {e}")
+                continue
+        
+        conn.commit()
+        return new_recommendations
+    except Exception as e:
+        logger.error(f"Database error in save_recommendations: {e}")
+        conn.rollback()
+        return []
+    finally:
+        conn.close()
+
+# Add Telegram notification functionality
+def send_telegram_notification(message):
+    """Send notification via Telegram"""
+    if not TELEGRAM_BOT_TOKEN or not TELEGRAM_USER_ID:
+        logger.warning("Telegram credentials not set. Skipping notification.")
+        return False
+    
+    try:
+        url = f"https://api.telegram.org/bot{TELEGRAM_BOT_TOKEN}/sendMessage"
+        payload = {
+            'chat_id': TELEGRAM_USER_ID,
+            'text': message,
+            'parse_mode': 'HTML'
+        }
+        response = requests.post(url, data=payload, timeout=10)
+        response.raise_for_status()
+        logger.info("Telegram notification sent successfully")
+        return True
+    except Exception as e:
+        logger.error(f"Failed to send Telegram notification: {e}")
+        return False
+
+# Complete the Flask routes
+@app.route('/')
+def index():
+    """Home page showing list of active sites and recent recommendations"""
+    conn = sqlite3.connect('recommendations.db')
+    conn.row_factory = sqlite3.Row
+    cursor = conn.cursor()
+    
+    # Get all active sites
+    cursor.execute("SELECT * FROM sites WHERE active = 1 ORDER BY name")
+    sites = cursor.fetchall()
+    
+    # Get recent recommendations (last 24 hours)
+    cursor.execute('''
+    SELECT r.*, s.name as site_name 
+    FROM recommendations r
+    JOIN sites s ON r.site_id = s.id
+    WHERE r.processed_at > datetime('now', '-1 day')
+    ORDER BY r.processed_at DESC
+    LIMIT 50
+    ''')
+    recommendations = cursor.fetchall()
+    
+    conn.close()
+    
+    return render_template(
+        'index.html', 
+        sites=sites, 
+        recommendations=recommendations,
+        current_time=datetime.now().strftime("%Y-%m-%d %H:%M:%S")
+    )
+
+@app.route('/scan/<int:site_id>')
+def scan_site(site_id):
+    """Manually trigger a scan for a specific site"""
+    conn = sqlite3.connect('recommendations.db')
+    conn.row_factory = sqlite3.Row
+    cursor = conn.cursor()
+    
+    # Get site details
+    cursor.execute("SELECT * FROM sites WHERE id = ?", (site_id,))
+    site = cursor.fetchone()
+    
+    if not site:
+        conn.close()
+        return jsonify({'error': 'Site not found'}), 404
+    
+    conn.close()
+    
+    # Run the scraper
+    try:
+        scraper = ChartInkScraper(
+            site_id=site['id'],
+            name=site['name'],
+            url=site['url'],
+            selector=site['selector'] if site['selector'] else 'div.table-responsive table'
+        )
+        
+        content = scraper.fetch_page()
+        if content:
+            scraper.parse_recommendations(content)
+            new_recommendations = scraper.save_recommendations()
+            
+            # Send notification if new recommendations found
+            if new_recommendations:
+                message = f"<b>New stock recommendations from {site['name']}</b>\n\n"
+                for i, rec in enumerate(new_recommendations[:5], 1):  # Limit to 5 for brevity
+                    message += f"{i}. <b>{rec['symbol']}</b> - {rec['stock_name']}\n"
+                    message += f"   Price: {rec['current_price']} ({rec['pct_change']})\n"
+                    message += f"   Recommendation: {rec['recommendation_type']}\n\n"
+                
+                if len(new_recommendations) > 5:
+                    message += f"...and {len(new_recommendations) - 5} more recommendations."
+                
+                send_telegram_notification(message)
+            
+            return jsonify({
+                'success': True,
+                'message': f"Scan completed for {site['name']}",
+                'new_recommendations': len(new_recommendations)
+            })
+        else:
+            return jsonify({
+                'success': False,
+                'message': f"Failed to fetch content from {site['url']}"
+            }), 500
+    except Exception as e:
+        logger.error(f"Error in scan_site: {e}")
+        return jsonify({
+            'success': False,
+            'message': f"Error: {str(e)}"
+        }), 500
+
+@app.route('/sites', methods=['GET', 'POST'])
+def manage_sites():
+    """Manage site configurations"""
+    conn = sqlite3.connect('recommendations.db')
+    conn.row_factory = sqlite3.Row
+    cursor = conn.cursor()
+    
+    if request.method == 'POST':
+        # Add or update site
+        site_id = request.form.get('id')
+        name = request.form.get('name')
+        url = request.form.get('url')
+        selector = request.form.get('selector')
+        is_table = 1 if request.form.get('is_table') == 'on' else 0
+        active = 1 if request.form.get('active') == 'on' else 0
+        
+        if site_id:
+            # Update existing site
+            cursor.execute('''
+            UPDATE sites 
+            SET name = ?, url = ?, selector = ?, is_table = ?, active = ?
+            WHERE id = ?
+            ''', (name, url, selector, is_table, active, site_id))
+            message = f"Site '{name}' updated successfully"
+        else:
+            # Add new site
+            cursor.execute('''
+            INSERT INTO sites (name, url, selector, is_table, active)
+            VALUES (?, ?, ?, ?, ?)
+            ''', (name, url, selector, is_table, active))
+            message = f"Site '{name}' added successfully"
+        
+        conn.commit()
+        conn.close()
+        return redirect(url_for('manage_sites'))
+    
+    # GET request - show list of sites
+    cursor.execute("SELECT * FROM sites ORDER BY name")
+    sites = cursor.fetchall()
+    conn.close()
+    
+    return render_template('sites.html', sites=sites)
+
+@app.route('/sites/delete/<int:site_id>', methods=['POST'])
+def delete_site(site_id):
+    """Delete a site configuration"""
+    conn = sqlite3.connect('recommendations.db')
+    cursor = conn.cursor()
+    
+    # Get site name for confirmation message
+    cursor.execute("SELECT name FROM sites WHERE id = ?", (site_id,))
+    site = cursor.fetchone()
+    
+    if site:
+        site_name = site[0]
+        
+        # Delete site
+        cursor.execute("DELETE FROM sites WHERE id = ?", (site_id,))
+        conn.commit()
+        conn.close()
+        
+        return jsonify({
+            'success': True,
+            'message': f"Site '{site_name}' deleted successfully"
+        })
+    else:
+        conn.close()
+        return jsonify({
+            'success': False,
+            'message': "Site not found"
+        }), 404
+
+@app.route('/recommendations')
+def view_recommendations():
+    """View all recommendations with filtering options"""
+    conn = sqlite3.connect('recommendations.db')
+    conn.row_factory = sqlite3.Row
+    cursor = conn.cursor()
+    
+    # Get filter parameters
+    site_id = request.args.get('site_id', type=int)
+    symbol = request.args.get('symbol', '')
+    rec_type = request.args.get('type', '')
+    days = request.args.get('days', 7, type=int)
+    
+    # Build query conditions
+    conditions = ["r.processed_at > datetime('now', ? || ' days')"]
+    params = [f"-{days}"]
+    
+    if site_id:
+        conditions.append("r.site_id = ?")
+        params.append(site_id)
+    
+    if symbol:
+        conditions.append("r.symbol LIKE ?")
+        params.append(f"%{symbol}%")
+    
+    if rec_type:
+        conditions.append("r.recommendation_type = ?")
+        params.append(rec_type)
+    
+    # Get sites for filter dropdown
+    cursor.execute("SELECT id, name FROM sites WHERE active = 1 ORDER BY name")
+    sites = cursor.fetchall()
+    
+    # Get recommendation types for filter dropdown
+    cursor.execute("SELECT DISTINCT recommendation_type FROM recommendations ORDER BY recommendation_type")
+    rec_types = [row[0] for row in cursor.fetchall()]
+    
+    # Build and execute query
+    query = f'''
+    SELECT r.*, s.name as site_name 
+    FROM recommendations r
+    JOIN sites s ON r.site_id = s.id
+    WHERE {' AND '.join(conditions)}
+    ORDER BY r.processed_at DESC
+    LIMIT 500
+    '''
+    
+    cursor.execute(query, params)
+    recommendations = cursor.fetchall()
+    
+    conn.close()
+    
+    return render_template(
+        'recommendations.html',
+        recommendations=recommendations,
+        sites=sites,
+        rec_types=rec_types,
+        filters={
+            'site_id': site_id,
+            'symbol': symbol,
+            'type': rec_type,
+            'days': days
+        }
+    )
+
+# Add scheduled scanning functionality
+def run_scheduled_scans():
+    """Run scans for all active sites on a schedule"""
+    conn = sqlite3.connect('recommendations.db')
+    conn.row_factory = sqlite3.Row
+    cursor = conn.cursor()
+    
+    # Get all active sites
+    cursor.execute("SELECT * FROM sites WHERE active = 1")
+    sites = cursor.fetchall()
+    conn.close()
+    
+    for site in sites:
+        try:
+            logger.info(f"Running scheduled scan for {site['name']}")
+            
+            scraper = ChartInkScraper(
+                site_id=site['id'],
+                name=site['name'],
+                url=site['url'],
+                selector=site['selector'] if site['selector'] else 'div.table-responsive table'
+            )
+            
+            content = scraper.fetch_page()
+            if content:
+                scraper.parse_recommendations(content)
+                new_recommendations = scraper.save_recommendations()
+                
+                # Send notification if new recommendations found
+                if new_recommendations:
+                    message = f"<b>New stock recommendations from {site['name']}</b>\n\n"
+                    for i, rec in enumerate(new_recommendations[:5], 1):
+                        message += f"{i}. <b>{rec['symbol']}</b> - {rec['stock_name']}\n"
+                        message += f"   Price: {rec['current_price']} ({rec['pct_change']})\n"
+                        message += f"   Recommendation: {rec['recommendation_type']}\n\n"
+                    
+                    if len(new_recommendations) > 5:
+                        message += f"...and {len(new_recommendations) - 5} more recommendations."
+                    
+                    send_telegram_notification(message)
+                
+                logger.info(f"Scan completed for {site['name']}. Found {len(new_recommendations)} new recommendations.")
+            else:
+                logger.error(f"Failed to fetch content from {site['url']}")
+            
+            # Wait between requests to avoid overloading servers
+            time.sleep(5)
+        except Exception as e:
+            logger.error(f"Error scanning site {site['name']}: {e}")
+            continue
+
+# Start the scheduled scanning in a separate thread
+def start_scheduler():
+    """Start the scheduler in a background thread"""
+    def run_scheduler():
+        while True:
+            try:
+                run_scheduled_scans()
+                # Run every 4 hours
+                time.sleep(4 * 60 * 60)
+            except Exception as e:
+                logger.error(f"Error in scheduler: {e}")
+                time.sleep(10 * 60)  # Wait 10 minutes before retry on error
+    
+    scheduler_thread = threading.Thread(target=run_scheduler)
+    scheduler_thread.daemon = True
+    scheduler_thread.start()
+    logger.info("Scheduler started in background")
+
+# Add HTML templates - index.html
+def create_templates():
+    """Create template directory and HTML files if they don't exist"""
+    if not os.path.exists('templates'):
+        os.makedirs('templates')
+    
+    # Create index.html
+    index_html = '''
+    <!DOCTYPE html>
+    <html lang="en">
+    <head>
+        <meta charset="UTF-8">
+        <meta name="viewport" content="width=device-width, initial-scale=1.0">
+        <title>ChartInk Stock Recommendations</title>
+        <link href="https://cdn.jsdelivr.net/npm/bootstrap@5.1.3/dist/css/bootstrap.min.css" rel="stylesheet">
+        <style>
+            .recommendation-card {
+                margin-bottom: 15px;
+            }
+            .rec-buy {
+                background-color: #d4edda;
+                border-color: #c3e6cb;
+            }
+            .rec-strong-buy {
+                background-color: #c3e6cb;
+                border-color: #b1dfbb;
+            }
+            .rec-hold {
+                background-color: #fff3cd;
+                border-color: #ffeeba;
+            }
+            .rec-sell, .rec-weak-sell {
+                background-color: #f8d7da;
+                border-color: #f5c6cb;
+            }
+        </style>
+    </head>
+    <body>
+        <nav class="navbar navbar-expand-lg navbar-dark bg-dark">
+            <div class="container">
+                <a class="navbar-brand" href="/">ChartInk Scraper</a>
+                <button class="navbar-toggler" type="button" data-bs-toggle="collapse" data-bs-target="#navbarNav">
+                    <span class="navbar-toggler-icon"></span>
+                </button>
+                <div class="collapse navbar-collapse" id="navbarNav">
+                    <ul class="navbar-nav">
+                        <li class="nav-item">
+                            <a class="nav-link active" href="/">Home</a>
+                        </li>
+                        <li class="nav-item">
+                            <a class="nav-link" href="/recommendations">Recommendations</a>
+                        </li>
+                        <li class="nav-item">
+                            <a class="nav-link" href="/sites">Manage Sites</a>
+                        </li>
+                    </ul>
+                </div>
+            </div>
+        </nav>
+
+        <div class="container mt-4">
+            <h2>Active Sites</h2>
+            <div class="row">
+                {% for site in sites %}
+                <div class="col-md-4 mb-3">
+                    <div class="card">
+                        <div class="card-body">
+                            <h5 class="card-title">{{ site.name }}</h5>
+                            <p class="card-text">
+                                <small class="text-muted">Last scan: 
+                                    {% if site.last_scan %}
+                                        {{ site.last_scan }}
+                                    {% else %}
+                                        Never
+                                    {% endif %}
+                                </small>
+                            </p>
+                            <a href="{{ site.url }}" target="_blank" class="btn btn-sm btn-outline-primary">View Site</a>
+                            <a href="/scan/{{ site.id }}" class="btn btn-sm btn-success scan-site">Run Scan</a>
+                        </div>
+                    </div>
+                </div>
+                {% endfor %}
+            </div>
+
+            <h2 class="mt-4">Recent Recommendations</h2>
+            <div class="row">
+                {% for rec in recommendations %}
+                <div class="col-md-4">
+                    <div class="card recommendation-card rec-{{ rec.recommendation_type.lower().replace(' ', '-') }}">
+                        <div class="card-body">
+                            <h5 class="card-title">{{ rec.symbol }} - {{ rec.stock_name }}</h5>
+                            <h6 class="card-subtitle mb-2 text-muted">{{ rec.recommendation_type }}</h6>
+                            <p class="card-text">
+                                Price: {{ rec.current_price }} ({{ rec.pct_change }})<br>
+                                Volume: {{ rec.volume }}<br>
+                                From: {{ rec.site_name }}<br>
+                                <small class="text-muted">{{ rec.processed_at }}</small>
+                            </p>
+                            {% if rec.links %}
+                            <a href="{{ rec.links }}" target="_blank" class="btn btn-sm btn-outline-info">View Details</a>
+                            {% endif %}
+                        </div>
+                    </div>
+                </div>
+                {% endfor %}
+            </div>
+        </div>
+
+        <script src="https://cdn.jsdelivr.net/npm/bootstrap@5.1.3/dist/js/bootstrap.bundle.min.js"></script>
+        <script>
+            document.addEventListener('DOMContentLoaded', function() {
+                // Handle scan site buttons
+                document.querySelectorAll('.scan-site').forEach(button => {
+                    button.addEventListener('click', function(e) {
+                        e.preventDefault();
+                        const scanUrl = this.getAttribute('href');
+                        
+                        this.textContent = 'Scanning...';
+                        this.disabled = true;
+                        
+                        fetch(scanUrl)
+                            .then(response => response.json())
+                            .then(data => {
+                                if (data.success) {
+                                    alert(data.message + ': ' + data.new_recommendations + ' new recommendations');
+                                } else {
+                                    alert('Error: ' + data.message);
+                                }
+                                location.reload();
+                            })
+                            .catch(error => {
+                                alert('Error: ' + error);
+                                this.textContent = 'Run Scan';
+                                this.disabled = false;
+                            });
+                    });
+                });
+            });
+        </script>
+    </body>
+    </html>
+    '''
+    
+    with open('templates/index.html', 'w') as f:
+        f.write(index_html)
+    
+    # Create sites.html
+    sites_html = '''
+    <!DOCTYPE html>
+    <html lang="en">
+    <head>
+        <meta charset="UTF-8">
+        <meta name="viewport" content="width=device-width, initial-scale=1.0">
+        <title>Manage Sites - ChartInk Scraper</title>
+        <link href="https://cdn.jsdelivr.net/npm/bootstrap@5.1.3/dist/css/bootstrap.min.css" rel="stylesheet">
+    </head>
+    <body>
+        <nav class="navbar navbar-expand-lg navbar-dark bg-dark">
+            <div class="container">
+                <a class="navbar-brand" href="/">ChartInk Scraper</a>
+                <button class="navbar-toggler" type="button" data-bs-toggle="collapse" data-bs-target="#navbarNav">
+                    <span class="navbar-toggler-icon"></span>
+                </button>
+                <div class="collapse navbar-collapse" id="navbarNav">
+                    <ul class="navbar-nav">
+                        <li class="nav-item">
+                            <a class="nav-link" href="/">Home</a>
+                        </li>
+                        <li class="nav-item">
+                            <a class="nav-link" href="/recommendations">Recommendations</a>
+                        </li>
+                        <li class="nav-item">
+                            <a class="nav-link active" href="/sites">Manage Sites</a>
+                        </li>
+                    </ul>
+                </div>
+            </div>
+        </nav>
+
+        <div class="container mt-4">
+            <h2>Manage Sites</h2>
+            
+            <button class="btn btn-primary mb-3" data-bs-toggle="modal" data-bs-target="#siteModal">Add New Site</button>
+            
+            <table class="table table-striped">
+                <thead>
+                    <tr>
+                        <th>Name</th>
+                        <th>URL</th>
+                        <th>Selector</th>
+                        <th>Table Format</th>
+                        <th>Status</th>
+                        <th>Last Scan</th>
+                        <th>Actions</th>
+                    </tr>
+                </thead>
+                <tbody>
+                    {% for site in sites %}
+                    <tr>
+                        <td>{{ site.name }}</td>
+                        <td><a href="{{ site.url }}" target="_blank">{{ site.url }}</a></td>
+                        <td>{{ site.selector }}</td>
+                        <td>{{ "Table" if site.is_table else "Non-Table" }}</td>
+                        <td>
+                            <span class="badge {{ 'bg-success' if site.active else 'bg-danger' }}">
+                                {{ "Active" if site.active else "Inactive" }}
+                            </span>
+                        </td>
+                        <td>{{ site.last_scan if site.last_scan else "Never" }}</td>
+                        <td>
+                            <button class="btn btn-sm btn-outline-primary edit-site" 
+                                    data-id="{{ site.id }}"
+                                    data-name="{{ site.name }}"
+                                    data-url="{{ site.url }}"
+                                    data-selector="{{ site.selector }}"
+                                    data-is-table="{{ site.is_table }}"
+                                    data-active="{{ site.active }}">
+                                Edit
+                            </button>
+                            <button class="btn btn-sm btn-outline-danger delete-site" 
+                                    data-id="{{ site.id }}"
+                                    data-name="{{ site.name }}">
+                                Delete
+                            </button>
+                        </td>
+                    </tr>
+                    {% endfor %}
+                </tbody>
+            </table>
+        </div>
+
+        <!-- Site Modal -->
+        <div class="modal fade" id="siteModal" tabindex="-1">
+            <div class="modal-dialog">
+                <div class="modal-content">
+                    <div class="modal-header">
+                        <h5 class="modal-title" id="siteModalLabel">Site Configuration</h5>
+                        <button type="button" class="btn-close" data-bs-dismiss="modal" aria-label="Close"></button>
+                    </div>
+                    <form action="/sites" method="post">
+                        <div class="modal-body">
+                            <input type="hidden" id="site-id" name="id">
+                            
+                            <div class="mb-3">
+                                <label for="site-name" class="form-label">Name</label>
+                                <input type="text" class="form-control" id="site-name" name="name" required>
+                            </div>
+                            
+                            <div class="mb-3">
+                                <label for="site-url" class="form-label">URL</label>
+                                <input type="url" class="form-control" id="site-url" name="url" required>
+                            </div>
+                            
+                            <div class="mb-3">
+                                <label for="site-selector" class="form-label">CSS Selector</label>
+                                <input type="text" class="form-control" id="site-selector" name="selector" 
+                                       placeholder="table.table, div.table-responsive table">
+                                <small class="text-muted">Leave empty for default selector</small>
+                            </div>
+                            
+                            <div class="mb-3 form-check">
+                                <input type="checkbox" class="form-check-input" id="site-is-table" name="is_table" checked>
+                                <label class="form-check-label" for="site-is-table">Table Format</label>
+                            </div>
+                            
+                            <div class="mb-3 form-check">
+                                <input type="checkbox" class="form-check-input" id="site-active" name="active" checked>
+                                <label class="form-check-label" for="site-active">Active</label>
+                            </div>
+                        </div>
+                        <div class="modal-footer">
+                            <button type="button" class="btn btn-secondary" data-bs-dismiss="modal">Cancel</button>
+                            <button type="submit" class="btn btn-primary">Save</button>
+                        </div>
+                    </form>
+                </div>
+            </div>
+        </div>
+
+        <script src="https://cdn.jsdelivr.net/npm/bootstrap@5.1.3/dist/js/bootstrap.bundle.min.js"></script>
+        <script>
+            document.addEventListener('DOMContentLoaded', function() {
+                // Edit site button
+                document.querySelectorAll('.edit-site').forEach(button => {
+                    button.addEventListener('click', function() {
+                        const modal = new bootstrap.Modal(document.getElementById('siteModal'));
+                        document.getElementById('siteModalLabel').textContent = 'Edit Site';
+                        document.getElementById('site-id').value = this.dataset.id;
+                        document.getElementById('site-name').value = this.dataset.name;
+                        document.getElementById('site-url').value = this.dataset.url;
+                        document.getElementById('site-selector').value = this.dataset.selector;
+                        document.getElementById('site-is-table').checked = this.dataset.isTable === '1';
+                        document.getElementById('site-active').checked = this.dataset.active === '1';
+                        modal.show();
+                    });
+                });
+                
+                // Add new site button
+                document.querySelector('[data-bs-target="#siteModal"]').addEventListener('click', function() {
+                    document.getElementById('siteModalLabel').textContent = 'Add New Site';
+                    document.getElementById('site-id').value = '';
+                    document.getElementById('site-name').value = '';
+                    document.getElementById('site-url').value = '';
+                    document.getElementById('site-selector').value = '';
+                    document.getElementById('site-is-table').checked = true;
+                    document.getElementById('site-active').checked = true;
+                });
+                
+                // Delete site button
+                document.querySelectorAll('.delete-site').forEach(button => {
+                    button.addEventListener('click', function() {
+                        if (confirm(`Are you sure you want to delete the site "${this.dataset.name}"?`)) {
+                            fetch(`/sites/delete/${this.dataset.id}`, {
+                                method: 'POST'
+                            })
+                            .then(response => response.json())
+                            .then(data => {
+                                if (data.success) {
+                                    alert(data.message);
+                                    location.reload();
+                                } else {
+                                    alert('Error: ' + data.message);
+                                }
+                            })
+                            .catch(error => {
+                                alert('Error: ' + error);
+                            });
+                        }
+                    });
+                });
+            });
+        </script>
+    </body>
+    </html>
+    '''
+    
+    with open('templates/sites.html', 'w') as f:
+        f.write(sites_html)
+    
+    # Create recommendations.html
+    recommendations_html = '''
+    <!DOCTYPE html>
+    <html lang="en">
+    <head>
+        <meta charset="UTF-8">
+        <meta name="viewport" content="width=device-width, initial-scale=1.0">
+        <title>Stock Recommendations - ChartInk Scraper</title>
+        <link href="https://cdn.jsdelivr.net/npm/bootstrap@5.1.3/dist/css/bootstrap.min.css" rel="stylesheet">
+        <style>
+            .recommendation-card {
+                margin-bottom: 15px;
+            }
+            .rec-buy {
+                background-color: #d4edda;
+                border-color: #c3e6cb;
+            }
+            .rec-strong-buy {
+                background-color: #c3e6cb;
+                border-color: #b1dfbb;
+            }
+            .rec-hold {
+                background-color: #fff3cd;
+                border-color: #ffeeba;
+            }
+            .rec-sell, .rec-weak-sell {
+                background-color: #f8d7da;
+                border-color: #f5c6cb;
+            }
+        </style>
+    </head>
+    <body>
+        <nav class="navbar navbar-expand-lg navbar-dark bg-dark">
+    # Continue recommendations.html template
+    recommendations_html_continued = '''
+            <div class="container">
+                <a class="navbar-brand" href="/">ChartInk Scraper</a>
+                <button class="navbar-toggler" type="button" data-bs-toggle="collapse" data-bs-target="#navbarNav">
+                    <span class="navbar-toggler-icon"></span>
+                </button>
+                <div class="collapse navbar-collapse" id="navbarNav">
+                    <ul class="navbar-nav">
+                        <li class="nav-item">
+                            <a class="nav-link" href="/">Home</a>
+                        </li>
+                        <li class="nav-item">
+                            <a class="nav-link active" href="/recommendations">Recommendations</a>
+                        </li>
+                        <li class="nav-item">
+                            <a class="nav-link" href="/sites">Manage Sites</a>
+                        </li>
+                    </ul>
+                </div>
+            </div>
+        </nav>
+
+        <div class="container mt-4">
+            <h2>Stock Recommendations</h2>
+            
+            <!-- Filter Form -->
+            <div class="card mb-4">
+                <div class="card-body">
+                    <form method="get" class="row g-3">
+                        <div class="col-md-3">
+                            <label for="site_id" class="form-label">Site</label>
+                            <select id="site_id" name="site_id" class="form-select">
+                                <option value="">All Sites</option>
+                                {% for site in sites %}
+                                <option value="{{ site.id }}" {% if filters.site_id == site.id %}selected{% endif %}>
+                                    {{ site.name }}
+                                </option>
+                                {% endfor %}
+                            </select>
+                        </div>
+                        <div class="col-md-3">
+                            <label for="symbol" class="form-label">Symbol</label>
+                            <input type="text" class="form-control" id="symbol" name="symbol" 
+                                   value="{{ filters.symbol }}" placeholder="Enter symbol">
+                        </div>
+                        <div class="col-md-3">
+                            <label for="type" class="form-label">Recommendation Type</label>
+                            <select id="type" name="type" class="form-select">
+                                <option value="">All Types</option>
+                                {% for type in rec_types %}
+                                <option value="{{ type }}" {% if filters.type == type %}selected{% endif %}>
+                                    {{ type }}
+                                </option>
+                                {% endfor %}
+                            </select>
+                        </div>
+                        <div class="col-md-2">
+                            <label for="days" class="form-label">Days</label>
+                            <select id="days" name="days" class="form-select">
+                                <option value="1" {% if filters.days == 1 %}selected{% endif %}>1 day</option>
+                                <option value="3" {% if filters.days == 3 %}selected{% endif %}>3 days</option>
+                                <option value="7" {% if filters.days == 7 %}selected{% endif %}>7 days</option>
+                                <option value="14" {% if filters.days == 14 %}selected{% endif %}>14 days</option>
+                                <option value="30" {% if filters.days == 30 %}selected{% endif %}>30 days</option>
+                            </select>
+                        </div>
+                        <div class="col-md-1">
+                            <label class="form-label">&nbsp;</label>
+                            <button type="submit" class="btn btn-primary w-100">Filter</button>
+                        </div>
+                    </form>
+                </div>
+            </div>
+            
+            <!-- Results Count -->
+            <p>Found {{ recommendations|length }} recommendations</p>
+            
+            <!-- Recommendations List -->
+            <div class="row">
+                {% for rec in recommendations %}
+                <div class="col-md-4">
+                    <div class="card recommendation-card rec-{{ rec.recommendation_type.lower().replace(' ', '-') }}">
+                        <div class="card-body">
+                            <h5 class="card-title">{{ rec.symbol }} - {{ rec.stock_name }}</h5>
+                            <h6 class="card-subtitle mb-2 text-muted">{{ rec.recommendation_type }}</h6>
+                            <p class="card-text">
+                                Price: {{ rec.current_price }} ({{ rec.pct_change }})<br>
+                                Volume: {{ rec.volume }}<br>
+                                {% if rec.industry != 'N/A' %}Industry: {{ rec.industry }}<br>{% endif %}
+                                {% if rec.pe_ratio %}P/E: {{ rec.pe_ratio }}<br>{% endif %}
+                                {% if rec.year_high %}52W High/Low: {{ rec.year_high }}/{{ rec.year_low }}<br>{% endif %}
+                                From: {{ rec.site_name }}<br>
+                                <small class="text-muted">{{ rec.processed_at }}</small>
+                            </p>
+                            {% if rec.links %}
+                            <a href="{{ rec.links }}" target="_blank" class="btn btn-sm btn-outline-info">View Details</a>
+                            {% endif %}
+                        </div>
+                    </div>
+                </div>
+                {% endfor %}
+            </div>
+            
+            {% if not recommendations %}
+            <div class="alert alert-info">
+                No recommendations found for the selected filters.
+            </div>
+            {% endif %}
+        </div>
+
+        <script src="https://cdn.jsdelivr.net/npm/bootstrap@5.1.3/dist/js/bootstrap.bundle.min.js"></script>
+    </body>
+    </html>
+    '''
+    
+    recommendations_html = recommendations_html + recommendations_html_continued
+    with open('templates/recommendations.html', 'w') as f:
+        f.write(recommendations_html)
+
+# Main application entry point
+if __name__ == "__main__":
+    # Initialize database and create templates
+    init_db()
+    create_templates()
+    
+    # Start the background scheduler
+    start_scheduler()
+    
+    # Run the Flask app
+    app.run(debug=True, host='0.0.0.0', port=5000)
