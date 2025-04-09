@@ -17,3 +17,4 @@ gunicorn==21.2.0
 schedule
 flask_sqlalchemy
 tabulate
+talib
