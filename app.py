@@ -1,24 +1,3 @@
-Write an optimized phyton script, to be published as web service on render.
-Webpage is https://robot-pdwz.onrender.com/.
-Telegram API token is 8017759392:AAEwM-W-y83lLXTjlPl8sC_aBmizuIrFXnU
-Telegram Chat id is 711856868
-Telegram group channel is @Stockniftybot
-
-1. Fetch stocks list from nifty50_stocks.csv
-2. Publish Buy/Sell Recommendations with a target price and use best technical indicators in a html format on webpage
-3. Use Panda, not TA-Lib
-4. Send message to telegram using chat id and group channel
-5. Create template files in templates folder on GitHub repository
-6. Add Paper trading model and backtesting engine. Publish on webpage
-
-
-TELEGRAM_BOT_TOKEN = "8017759392:AAEwM-W-y83lLXTjlPl8sC_aBmizuIrFXnU"
-TELEGRAM_CHAT_ID = "711856868"  # Replace with your channel or chat ID
-TELEGRAM_GROUP_CHANNEL = "@Stockniftybot"
-
-
---------------------------------------------------------------------------
-
 # app.py
 import logging
 import gc
