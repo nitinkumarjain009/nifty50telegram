@@ -1017,27 +1017,27 @@ def ensure_directories():
     recommendations = get_recommendations_with_targets(stock_data, symbol)
     
     # Format and send the analysis
-    message = format_recommendations_message(recommendations)
-        await update.message.reply_markdown(message)
-    
-    # Create and send chart
-    try:
-        fig = create_technical_chart(stock_data, symbol)
-        if fig:
-            chart_path = f"static/{symbol}_chart.png"
-            pio.write_image(fig, chart_path)
-            
-            # Send the chart as photo
-            with open(chart_path, 'rb') as photo:
-                await update.message.reply_photo(photo=photo, caption=f"Technical chart for {symbol}")
-    except Exception as e:
-        await update.message.reply_text(f"Error generating chart: {e}")
+message = format_recommendations_message(recommendations)
+await update.message.reply_markdown(message)
 
+# Create and send chart
+try:
+    fig = create_technical_chart(stock_data, symbol)
+    if fig:
+        chart_path = f"static/{symbol}_chart.png"
+        pio.write_image(fig, chart_path)
+        
+        # Send the chart as photo
+        with open(chart_path, 'rb') as photo:
+            await update.message.reply_photo(photo=photo, caption=f"Technical chart for {symbol}")
+except Exception as e:
+    await update.message.reply_text(f"Error generating chart: {e}")
+    
 async def handle_unknown_command(update: Update, context: ContextTypes.DEFAULT_TYPE):
     await update.message.reply_text(
         "Sorry, I didn't understand that command. Use /help to see available commands."
     )
-
+    
 async def handle_help_command(update: Update, context: ContextTypes.DEFAULT_TYPE):
     help_text = (
         "*Nifty 50 Stock Analyzer Bot Help*\n\n"
@@ -1052,7 +1052,7 @@ async def handle_help_command(update: Update, context: ContextTypes.DEFAULT_TYPE
         "The bot runs analysis every {CHECK_INTERVAL_MINUTES} minutes during market hours and sends notifications for BUY/SELL recommendations."
     )
     await update.message.reply_markdown(help_text)
-
+    
 async def handle_text_message(update: Update, context: ContextTypes.DEFAULT_TYPE):
     """Handle regular text messages - interpret as symbols to analyze"""
     text = update.message.text.strip().upper()
