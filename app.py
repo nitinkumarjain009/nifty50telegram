@@ -263,6 +263,8 @@ def get_portfolio_value(portfolio, current_prices):
     
     return total_value, portfolio['cash'], holdings_details
 
+# In the run_backtest function, replace the problematic code with this:
+
 def run_backtest(symbol, backtest_data, initial_capital=100000):
     """Run a simple backtest on historical data."""
     if backtest_data.empty:
@@ -271,8 +273,16 @@ def run_backtest(symbol, backtest_data, initial_capital=100000):
     # Ensure we have a dataframe with the right columns
     if isinstance(backtest_data.columns, pd.MultiIndex):
         if 'Close' in backtest_data.columns.get_level_values(0):
-            df = backtest_data['Close'].to_frame()
-            df.columns = ['Close']
+            # Handle MultiIndex DataFrame properly
+            close_data = backtest_data['Close']
+            
+            # Check if it's a Series (single-level) or DataFrame (multi-level)
+            if isinstance(close_data, pd.Series):
+                df = close_data.to_frame(name='Close')
+            else:
+                # It's already a DataFrame, rename column
+                df = close_data.copy()
+                df.columns = ['Close']
         else:
             return {"error": "Required 'Close' column not found in backtest data"}
     elif 'Close' in backtest_data.columns:
@@ -351,6 +361,128 @@ def run_backtest(symbol, backtest_data, initial_capital=100000):
         'buy_and_hold_return': buy_and_hold_return * 100,  # Convert to percentage
         'trades': trades
     }
+
+# Now, let's update the app to scan every 10 minutes and send Telegram notifications
+
+# Add these imports at the top
+import requests
+from apscheduler.schedulers.background import BackgroundScheduler
+import threading
+import pytz
+
+# Add these constants
+TELEGRAM_BOT_TOKEN = "YOUR_BOT_TOKEN"  # Replace with your actual bot token
+TELEGRAM_CHAT_ID = "YOUR_CHAT_ID"  # Replace with your channel or chat ID
+MARKET_OPEN_HOUR = 9  # 9 AM
+MARKET_CLOSE_HOUR = 15  # 3 PM
+SCAN_INTERVAL_MINUTES = 10
+INDIA_TIMEZONE = pytz.timezone('Asia/Kolkata')
+
+# Update the function to send Telegram notifications
+def send_telegram_message(message):
+    """Send a text message to Telegram."""
+    try:
+        url = f"https://api.telegram.org/bot{TELEGRAM_BOT_TOKEN}/sendMessage"
+        payload = {
+            "chat_id": TELEGRAM_CHAT_ID,
+            "text": message,
+            "parse_mode": "HTML"
+        }
+        response = requests.post(url, data=payload)
+        if response.status_code == 200:
+            logging.info(f"Telegram message sent successfully")
+            return True
+        else:
+            logging.error(f"Failed to send Telegram message: {response.text}")
+            return False
+    except Exception as e:
+        logging.error(f"Error sending Telegram message: {e}", exc_info=True)
+        return False
+
+def notify_recommendations_photo(df_summary):
+    """Send a Telegram notification with the recommendations."""
+    try:
+        # Filter only BUY signals
+        buy_signals = df_summary[df_summary['Signal'] == 'BUY']
+        
+        if buy_signals.empty:
+            logging.info("No BUY signals to send")
+            return True
+        
+        # Format message for Telegram
+        message = "<b>🔔 BUY SIGNALS 🔔</b>\n\n"
+        for _, row in buy_signals.iterrows():
+            message += f"<b>{row['Symbol']}</b>\n"
+            message += f"Current Price: ₹{row['CMP']}\n"
+            message += f"Target: ₹{row['Target']}\n"
+            message += f"Change: {row['% Change']}\n"
+            message += "---------------\n"
+        
+        # Add timestamp
+        now = datetime.now(INDIA_TIMEZONE)
+        message += f"\n<i>Generated at {now.strftime('%Y-%m-%d %H:%M:%S')}</i>"
+        
+        # Send message
+        send_telegram_message(message)
+        logging.info(f"Telegram notification sent with {len(buy_signals)} buy recommendations")
+        return True
+    except Exception as e:
+        logging.error(f"Error sending Telegram notification: {e}", exc_info=True)
+        return False
+
+# Function to check if market is open
+def is_market_open():
+    """Check if the market is currently open."""
+    now = datetime.now(INDIA_TIMEZONE)
+    
+    # Check if it's a weekday (Monday = 0, Sunday = 6)
+    if now.weekday() >= 5:  # Saturday or Sunday
+        return False
+    
+    # Check if it's within market hours (9:15 AM to 3:30 PM)
+    market_start = now.replace(hour=9, minute=15, second=0, microsecond=0)
+    market_end = now.replace(hour=15, minute=30, second=0, microsecond=0)
+    
+    return market_start <= now <= market_end
+
+# This is the new scheduled task function
+def scheduled_data_update():
+    """Function to be called by the scheduler."""
+    try:
+        if is_market_open():
+            logging.info("Scheduled update: Market is open, processing data...")
+            process_all_data()
+        else:
+            logging.info("Scheduled update: Market is closed, skipping data processing.")
+    except Exception as e:
+        logging.error(f"Error in scheduled data update: {e}", exc_info=True)
+
+# Initialize the scheduler and background thread
+scheduler = BackgroundScheduler()
+scheduler.add_job(
+    scheduled_data_update, 
+    'interval', 
+    minutes=SCAN_INTERVAL_MINUTES,
+    id='market_data_update'
+)
+
+# Update the main execution part
+if __name__ == '__main__':
+    logging.info("Performing initial data load on startup...")
+    process_all_data()
+    
+    # Start the scheduler
+    scheduler.start()
+    logging.info(f"Scheduler started. Running every {SCAN_INTERVAL_MINUTES} minutes during market hours.")
+    
+    try:
+        # Run the Flask app
+        logging.info("Initial data load complete. Web server starting...")
+        app.run(host='0.0.0.0', port=int(os.environ.get('PORT', 8080)))
+    except (KeyboardInterrupt, SystemExit):
+        # Shut down the scheduler when exiting
+        scheduler.shutdown()
+        logging.info("Application shutting down...")
 
 def notify_recommendations_photo(df_summary):
     """Send a Telegram notification with the recommendations."""
