@@ -195,6 +195,9 @@ def create_templates():
     .status-card .icon { font-size: 2rem; color: #fff; }
     .stock-count { font-size: 1.5rem; font-weight: bold; }
     .screener-tag { display: inline-block; margin-right: 5px; margin-bottom: 5px; }
+    .raw-html-container { overflow-x: auto; max-height: 500px; }
+    .status-message { padding: 20px; background-color: #f8f9fa; border-radius: 5px; }
+    .error-message { color: #721c24; background-color: #f8d7da; border-color: #f5c6cb; padding: 15px; border-radius: 5px; }
 </style>
 {% endblock %}
 
@@ -311,42 +314,65 @@ def create_templates():
             </div>
             <div class="card-body">
                 {% if scan_results[url.id].data|length > 0 %}
-                    <div class="table-responsive" style="max-height: 400px;">
-                        <table class="table table-sm table-striped table-hover data-table">
-                            <thead class="sticky-top">
-                                <tr>
-                                    {% for key in scan_results[url.id].data[0].keys() %}
-                                        <th>{{ key }}</th>
-                                    {% endfor %}
-                                </tr>
-                            </thead>
-                            <tbody>
-                                {% for row in scan_results[url.id].data %}
+                    {% set first_item = scan_results[url.id].data[0] %}
+                    
+                    {# Check if we have a special status message #}
+                    {% if 'status' in first_item %}
+                        <div class="status-message">
+                            {{ first_item.status }}
+                        </div>
+                    
+                    {# Check if we have an error message #}
+                    {% elif 'error' in first_item %}
+                        <div class="error-message">
+                            {{ first_item.error }}
+                        </div>
+                    
+                    {# Check if we have raw HTML to display #}
+                    {% elif 'raw_html' in first_item %}
+                        <div class="raw-html-container">
+                            {{ first_item.raw_html|safe }}
+                        </div>
+                    
+                    {# Standard data table display #}
+                    {% else %}
+                        <div class="table-responsive" style="max-height: 400px;">
+                            <table class="table table-sm table-striped table-hover data-table">
+                                <thead class="sticky-top">
                                     <tr>
-                                        {% for key, value in row.items() %}
-                                            <td>
-                                                {% if key == "nsecode" %}
-                                                    <a href="https://www.tradingview.com/chart/?symbol=NSE:{{ value }}" target="_blank">{{ value }}</a>
-                                                {% elif key == "change" or key == "pctchange" %}
-                                                    {% if value|float > 0 %}
-                                                        <span class="stock-up">+{{ value }}</span>
-                                                    {% elif value|float < 0 %}
-                                                        <span class="stock-down">{{ value }}</span>
+                                        {% for key in first_item.keys() %}
+                                            <th>{{ key }}</th>
+                                        {% endfor %}
+                                    </tr>
+                                </thead>
+                                <tbody>
+                                    {% for row in scan_results[url.id].data %}
+                                        <tr>
+                                            {% for key, value in row.items() %}
+                                                <td>
+                                                    {% if key == "nsecode" %}
+                                                        <a href="https://www.tradingview.com/chart/?symbol=NSE:{{ value }}" target="_blank">{{ value }}</a>
+                                                    {% elif key == "change" or key == "pctchange" %}
+                                                        {% if value|float > 0 %}
+                                                            <span class="stock-up">+{{ value }}</span>
+                                                        {% elif value|float < 0 %}
+                                                            <span class="stock-down">{{ value }}</span>
+                                                        {% else %}
+                                                            {{ value }}
+                                                        {% endif %}
                                                     {% else %}
                                                         {{ value }}
                                                     {% endif %}
-                                                {% else %}
-                                                    {{ value }}
-                                                {% endif %}
-                                            </td>
-                                        {% endfor %}
-                                    </tr>
-                                {% endfor %}
-                            </tbody>
-                        </table>
-                    </div>
+                                                </td>
+                                            {% endfor %}
+                                        </tr>
+                                    {% endfor %}
+                                </tbody>
+                            </table>
+                        </div>
+                    {% endif %}
                 {% else %}
-                    <p class="text-muted">No stocks matched the criteria in the last scan.</p>
+                    <p class="text-muted">No stocks matched the criteria in the last scan. The scan executed successfully but returned no results.</p>
                 {% endif %}
                 <div class="text-end mt-2">
                     <a href="{{ url.url }}" target="_blank" class="btn btn-sm btn-outline-primary">
@@ -599,11 +625,66 @@ def parse_chartink_table(url):
         # Extract the scan code from the URL
         scan_code = url.split('/')[-1]
         
-        # First attempt: Direct HTML parsing
+        # First attempt: Try API approach to get JSON data (most reliable)
+        api_url = "https://chartink.com/screener/process"
+        
+        # Get the page first to extract scan_clause
         response = requests.get(url, headers=headers)
         response.raise_for_status()
-        
         soup = BeautifulSoup(response.text, 'html.parser')
+        
+        # Try to extract scan_clause from the page
+        script_tags = soup.find_all('script')
+        scan_clause = None
+        
+        for script in script_tags:
+            if script.string and 'scan_clause' in script.string:
+                # Extract the scan clause using regex
+                match = re.search(r'scan_clause\s*:\s*[\'"](.+?)[\'"]', script.string)
+                if match:
+                    scan_clause = match.group(1)
+                    break
+        
+        if scan_clause:
+            payload = {
+                'scan_clause': scan_clause,
+                'screener_id': scan_code
+            }
+            
+            # Make API request
+            api_response = requests.post(api_url, data=payload, headers=headers)
+            api_response.raise_for_status()
+            
+            # Parse JSON response
+            data = api_response.json()
+            
+            if 'data' in data:
+                stock_data = data['data']
+                logger.info(f"Successfully retrieved data from API: {len(stock_data)} records")
+                # Convert to DataFrame even if empty (0 rows)
+                df = pd.DataFrame(stock_data)
+                return df
+        
+        # Second attempt: Try embedded JSON data
+        logger.info("API approach didn't yield results, trying embedded JSON...")
+        try:
+            # Look for data in the page's JSON script tags
+            for script in soup.find_all('script'):
+                if script.string and 'var scanData' in script.string:
+                    # Extract JSON data using regex
+                    match = re.search(r'var\s+scanData\s*=\s*(\[.+?\]);', script.string, re.DOTALL)
+                    if match:
+                        json_data = match.group(1)
+                        # Parse the JSON
+                        stock_data = json.loads(json_data)
+                        logger.info(f"Successfully retrieved data from embedded JSON: {len(stock_data)} records")
+                        df = pd.DataFrame(stock_data)
+                        return df
+        except Exception as json_error:
+            logger.error(f"Error parsing embedded JSON: {json_error}")
+
+        # Third attempt: Direct HTML parsing
+        logger.info("Trying HTML table parsing...")
         
         # Look for the table - ChartInk might use different table structures
         table = soup.find('table', class_='table table-striped table-bordered table-hover')
@@ -648,79 +729,35 @@ def parse_chartink_table(url):
                         rows.append(row)
             
             # Create DataFrame
-            if headers and rows and len(headers) == len(rows[0]):
-                df = pd.DataFrame(rows, columns=headers)
-                logger.info(f"Successfully parsed {len(df)} rows from HTML table")
-                return df
-        
-        # Second attempt: Try API approach to get JSON data
-        logger.info("HTML table parsing failed, trying API approach...")
-        
-        # ChartInk might have an API endpoint for screener data
-        api_url = "https://chartink.com/screener/process"
-        
-        # Try to extract scan_clause from the page
-        script_tags = soup.find_all('script')
-        scan_clause = None
-        
-        for script in script_tags:
-            if script.string and 'scan_clause' in script.string:
-                # Extract the scan clause using regex
-                match = re.search(r'scan_clause\s*:\s*[\'"](.+?)[\'"]', script.string)
-                if match:
-                    scan_clause = match.group(1)
-                    break
-        
-        if scan_clause:
-            payload = {
-                'scan_clause': scan_clause,
-                'screener_id': scan_code
-            }
-            
-            # Make API request
-            api_response = requests.post(api_url, data=payload, headers=headers)
-            api_response.raise_for_status()
-            
-            # Parse JSON response
-            data = api_response.json()
-            
-            if 'data' in data:
-                stock_data = data['data']
-                if stock_data:
-                    # Convert to DataFrame
-                    df = pd.DataFrame(stock_data)
-                    logger.info(f"Successfully parsed {len(df)} rows from API response")
+            if headers and rows:
+                if len(headers) == len(rows[0]):
+                    df = pd.DataFrame(rows, columns=headers)
+                    logger.info(f"Successfully parsed {len(df)} rows from HTML table")
                     return df
                 else:
-                    logger.info("API returned empty data set")
-                    return pd.DataFrame()  # Return empty DataFrame
+                    logger.warning(f"Headers count ({len(headers)}) doesn't match row column count ({len(rows[0])})")
         
-        # Third attempt: Try the newer format in some ChartInk screeners
-        try:
-            # Look for data in the page's JSON script tags
-            for script in soup.find_all('script'):
-                if script.string and 'var scanData' in script.string:
-                    # Extract JSON data using regex
-                    match = re.search(r'var\s+scanData\s*=\s*(\[.+?\]);', script.string, re.DOTALL)
-                    if match:
-                        json_data = match.group(1)
-                        # Parse the JSON
-                        stock_data = json.loads(json_data)
-                        if stock_data:
-                            df = pd.DataFrame(stock_data)
-                            logger.info(f"Successfully parsed {len(df)} rows from embedded JSON")
-                            return df
-        except Exception as json_error:
-            logger.error(f"Error parsing embedded JSON: {json_error}")
+        # Fourth attempt: Try to extract raw HTML content of the table
+        logger.info("Trying to extract raw table HTML...")
         
-       # If we reach here, all methods failed
-        logger.warning(f"Failed to parse data from {url}. Could not find table or API data.")
-        return pd.DataFrame()  # Return empty DataFrame
+        # If we can't parse it properly, return the raw HTML in a specially formatted DataFrame
+        if table:
+            raw_html = str(table)
+            # Create a special DataFrame with HTML content
+            df = pd.DataFrame([{"raw_html": raw_html}])
+            logger.info("Returning raw HTML table content")
+            return df
+        
+        # If we reach here, all methods failed but don't return empty DataFrame
+        # Instead, return a DataFrame with a status message for display
+        logger.warning(f"Could not parse data from {url} using standard methods")
+        return pd.DataFrame([{"status": "No parsable data found. View directly on ChartInk."}])
         
     except Exception as e:
         logger.error(f"Error fetching or parsing ChartInk data: {e}")
         logger.error(traceback.format_exc())
-        return pd.DataFrame()  # Return empty DataFrame
+        # Return DataFrame with error message instead of empty DataFrame
+        return pd.DataFrame([{"error": f"Error: {str(e)}"}])
 
 def scan_chartink_urls():
     """Scan all active ChartInk URLs and store results"""
@@ -744,14 +781,39 @@ def scan_chartink_urls():
             logger.info(f"Scanning URL: {url.name} ({url.url})")
             df = parse_chartink_table(url.url)
             
-            if df.empty:
-                message_parts.append(f"⚠️ <b>{url.name}</b>: No stocks found")
-                logger.info(f"No stocks found for {url.name}")
-                # Store empty result
+            # Check if we got a special error or status message DataFrame
+            if "error" in df.columns or "status" in df.columns or "raw_html" in df.columns:
+                logger.warning(f"Special case for {url.name}: {df.iloc[0].to_dict()}")
+                
+                # Store the result as is
+                records = df.to_dict('records')
                 result = ScanResult(
                     url_id=url.id,
                     scan_time=now,
-                    data=json.dumps([])
+                    data=json.dumps(records)
+                )
+                db.session.add(result)
+                
+                # Add to message
+                if "error" in df.columns:
+                    message_parts.append(f"❌ <b>{url.name}</b>: {df.iloc[0]['error']}")
+                elif "status" in df.columns:
+                    message_parts.append(f"⚠️ <b>{url.name}</b>: {df.iloc[0]['status']}")
+                elif "raw_html" in df.columns:
+                    message_parts.append(f"ℹ️ <b>{url.name}</b>: Raw HTML content captured")
+                
+                continue
+            
+            # For truly empty DataFrame (no rows but has columns)
+            if df.empty:
+                logger.info(f"No stocks found for {url.name} but received valid structure")
+                message_parts.append(f"ℹ️ <b>{url.name}</b>: No stocks matched the criteria")
+                
+                # Store empty result with column names intact
+                result = ScanResult(
+                    url_id=url.id,
+                    scan_time=now,
+                    data=json.dumps([])  # Empty list with valid structure
                 )
                 db.session.add(result)
                 continue
@@ -807,13 +869,31 @@ def scan_chartink_urls():
         db.session.rollback()
         logger.error(f"Failed to save scan results: {e}")
     
-    # Send Telegram notification
+    # Send Telegram notification with specific chat ID
     if scan_count > 0:
         message_parts.append(f"\n📈 <b>Total:</b> {total_stocks} stocks across {scan_count} scanners")
         message_parts.append(f"🕒 <b>Scan time:</b> {now.strftime('%d-%b-%Y %H:%M:%S')} IST")
         
         message = "\n".join(message_parts)
         send_telegram_message(message)
+
+def send_telegram_message(message):
+    """Send a message to Telegram"""
+    # Use specific chat ID
+    SPECIFIC_CHAT_ID = "711856868"
+    
+    if not TELEGRAM_TOKEN:
+        logger.warning("Telegram token not configured. Message not sent.")
+        return False
+    
+    try:
+        bot = Bot(token=TELEGRAM_TOKEN)
+        bot.send_message(chat_id=SPECIFIC_CHAT_ID, text=message, parse_mode='HTML')
+        logger.info(f"Sent Telegram message successfully to chat ID {SPECIFIC_CHAT_ID}")
+        return True
+    except TelegramError as e:
+        logger.error(f"Failed to send Telegram message: {e}")
+        return False
 
 def generate_daily_analysis():
     """Generate daily analysis from today's scan results"""
