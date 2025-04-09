@@ -82,7 +82,7 @@
                         <tr>
                             <td>{{ holding.symbol }}</td>
                             <td>{{ holding.quantity }}</td>
-                            <td>{{ "%.2f"|format(holding.buy_price) }}</td>
+                            <td>{{ "%.2f"|format(holding.avg_price) }}</td>
                             <td>{{ "%.2f"|format(holding.current_price) if holding.current_price != 'N/A' else 'N/A' }}</td>
                             <td>{{ "%.2f"|format(holding.value) }}</td>
                             <td class="{% if holding.pnl > 0 %}positive{% elif holding.pnl < 0 %}negative{% else %}neutral{% endif %}">{{ "%.2f"|format(holding.pnl) }}</td>
