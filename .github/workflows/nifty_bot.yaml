@@ -24,80 +24,145 @@ jobs:
           if [ -f requirements.txt ]; then 
             pip install -r requirements.txt
           else 
-            pip install requests pandas beautifulsoup4 twilio numpy
+            pip install requests pandas dataframe_image matplotlib
             pip install git+https://github.com/twopirllc/pandas-ta.git@development
           fi
       
-      - name: Install script as module
+      - name: Apply NumPy fix
         run: |
-          # Create simple setup.py
-          python -c "
-          with open('setup.py', 'w') as f:
-              f.write('''from setuptools import setup, find_packages
-          
-          setup(
-              name=\"nifty_bot\",
-              version=\"0.1\",
-              packages=find_packages(),
-              py_modules=[\"nifty_telegram_bot_github\"],
-          )
-          ''')
-          "
-          # Install the package
-          pip install -e .
-          
-          # Verify installation
-          pip list
+          echo "import numpy as np; np.NaN = np.nan" > numpy_fix.py
       
-      - name: Send startup notification
-        run: |
-          echo "Sending bot startup notification..."
-          if [ -n "${{ secrets.TELEGRAM_API_KEY }}" ] && [ -n "${{ secrets.TELEGRAM_CHAT_ID }}" ]; then
-            curl -s -X POST "https://api.telegram.org/bot${{ secrets.TELEGRAM_API_KEY }}/sendMessage" \
-            -d chat_id="${{ secrets.TELEGRAM_CHAT_ID }}" \
-            -d text="🚀 Nifty Bot Analysis started running at $(date)"
-          fi
-      
-      - name: Create runner script
+      - name: Send test notification
+        env:
+          TELEGRAM_TOKEN: ${{ secrets.TELEGRAM_API_KEY }}
+          TELEGRAM_CHAT_ID: ${{ secrets.TELEGRAM_CHAT_ID }}
         run: |
           python -c "
-          with open('run_script.py', 'w') as f:
-              f.write('''import numpy as np
-          np.NaN = np.nan  # Add NaN to numpy namespace
+          import requests
+          import os
+          import logging
           
-          try:
-              import nifty_telegram_bot_github
-              print('Successfully imported and ran nifty_telegram_bot_github')
-          except Exception as e:
-              import traceback
-              print(f'Error running nifty_telegram_bot_github: {e}')
-              traceback.print_exc()
-              exit(1)
-          ''')
+          # Get environment variables
+          token = os.environ.get('TELEGRAM_TOKEN')
+          chat_id = os.environ.get('TELEGRAM_CHAT_ID')
+          
+          if token and chat_id:
+              send_url = f'https://api.telegram.org/bot{token}/sendMessage'
+              payload = {
+                  'chat_id': chat_id,
+                  'text': '🧪 Testing Nifty Bot workflow at $(date)',
+                  'parse_mode': 'HTML'
+              }
+              
+              try:
+                  response = requests.post(send_url, data=payload, timeout=15)
+                  response.raise_for_status()
+                  print('Test message sent successfully!')
+              except Exception as e:
+                  print(f'Error sending test message: {e}')
+          else:
+              print('Missing Telegram credentials')
           "
       
-      - name: Run Nifty Bot Script
+      - name: Run Telegram Sender Script
         id: run_script
         continue-on-error: true
         env:
-          TELEGRAM_API_KEY: ${{ secrets.TELEGRAM_API_KEY }}
+          TELEGRAM_TOKEN: ${{ secrets.TELEGRAM_API_KEY }}
           TELEGRAM_CHAT_ID: ${{ secrets.TELEGRAM_CHAT_ID }}
-          WHATSAPP_ADMIN: ${{ secrets.WHATSAPP_ADMIN }}
-          WHATSAPP_GROUP: ${{ secrets.WHATSAPP_GROUP }}
-          TWILIO_ACCOUNT_SID: ${{ secrets.TWILIO_ACCOUNT_SID }}
-          TWILIO_AUTH_TOKEN: ${{ secrets.TWILIO_AUTH_TOKEN }}
-          TWILIO_FROM_NUMBER: ${{ secrets.TWILIO_FROM_NUMBER }}
-        run: python run_script.py
+          TELEGRAM_GROUP_CHANNEL: ${{ secrets.TELEGRAM_GROUP_ID }}
+          PYTHONPATH: ${{ github.workspace }}
+        run: |
+          # Create a simple test script that imports telegram_sender
+          cat > test_telegram.py << 'EOF'
+          import numpy as np
+          np.NaN = np.nan  # Add NaN to numpy namespace
+          
+          import os
+          import pandas as pd
+          from datetime import datetime, timezone
+          from telegram_sender import send_text_message, send_photo_message
+          
+          # Get environment variables
+          chat_id = os.environ.get('TELEGRAM_CHAT_ID')
+          group_id = os.environ.get('TELEGRAM_GROUP_CHANNEL')
+          
+          # Send a test message
+          print("Sending test message to Telegram...")
+          timestamp = datetime.now(timezone.utc).strftime('%Y-%m-%d %H:%M:%S UTC')
+          test_message = f"🤖 Nifty Bot Analysis is running a test at {timestamp}"
+          
+          if chat_id:
+              success = send_text_message(test_message, chat_id)
+              print(f"Message to chat_id sent: {success}")
+          
+          if group_id:
+              success = send_text_message(test_message, group_id)
+              print(f"Message to group_id sent: {success}")
+          
+          print("Test completed.")
+          EOF
+          
+          # Run the test script
+          python test_telegram.py
+      
+      - name: Send completion notification
+        if: steps.run_script.outcome == 'success'
+        env:
+          TELEGRAM_TOKEN: ${{ secrets.TELEGRAM_API_KEY }}
+          TELEGRAM_CHAT_ID: ${{ secrets.TELEGRAM_CHAT_ID }}
+        run: |
+          python -c "
+          import requests
+          import os
+          
+          token = os.environ.get('TELEGRAM_TOKEN')
+          chat_id = os.environ.get('TELEGRAM_CHAT_ID')
+          
+          if token and chat_id:
+              send_url = f'https://api.telegram.org/bot{token}/sendMessage'
+              payload = {
+                  'chat_id': chat_id,
+                  'text': '✅ Nifty Bot Analysis workflow completed successfully',
+                  'parse_mode': 'HTML'
+              }
+              
+              try:
+                  response = requests.post(send_url, data=payload, timeout=15)
+                  response.raise_for_status()
+                  print('Success message sent!')
+              except Exception as e:
+                  print(f'Error sending success message: {e}')
+          "
       
       - name: Check for errors
         if: steps.run_script.outcome == 'failure'
+        env:
+          TELEGRAM_TOKEN: ${{ secrets.TELEGRAM_API_KEY }}
+          TELEGRAM_CHAT_ID: ${{ secrets.TELEGRAM_CHAT_ID }}
         run: |
-          echo "Script execution failed. Sending notification..."
-          if [ -n "${{ secrets.TELEGRAM_API_KEY }}" ] && [ -n "${{ secrets.TELEGRAM_CHAT_ID }}" ]; then
-            curl -s -X POST "https://api.telegram.org/bot${{ secrets.TELEGRAM_API_KEY }}/sendMessage" \
-            -d chat_id="${{ secrets.TELEGRAM_CHAT_ID }}" \
-            -d text="⚠️ Nifty Bot Analysis failed to run. Please check GitHub Actions logs."
-          fi
+          python -c "
+          import requests
+          import os
+          
+          token = os.environ.get('TELEGRAM_TOKEN')
+          chat_id = os.environ.get('TELEGRAM_CHAT_ID')
+          
+          if token and chat_id:
+              send_url = f'https://api.telegram.org/bot{token}/sendMessage'
+              payload = {
+                  'chat_id': chat_id,
+                  'text': '⚠️ Nifty Bot Analysis failed to run. Please check GitHub Actions logs.',
+                  'parse_mode': 'HTML'
+              }
+              
+              try:
+                  response = requests.post(send_url, data=payload, timeout=15)
+                  response.raise_for_status()
+                  print('Error message sent!')
+              except Exception as e:
+                  print(f'Error sending error message: {e}')
+          "
       
       - name: Upload logs on failure
         if: steps.run_script.outcome == 'failure'
