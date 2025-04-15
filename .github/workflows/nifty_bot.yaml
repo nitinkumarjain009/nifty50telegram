@@ -38,20 +38,20 @@ jobs:
             # If no setup files exist, create a simple setup.py and install
             echo "Creating temporary setup.py for package installation"
             cat > setup.py << 'EOF'
-            from setuptools import setup, find_packages
-            
-            setup(
-                name="nifty_bot",
-                version="0.1",
-                packages=find_packages(),
-                py_modules=["nifty_telegram_bot_github"],
-            )
-            EOF
+from setuptools import setup, find_packages
+
+setup(
+    name="nifty_bot",
+    version="0.1",
+    packages=find_packages(),
+    py_modules=["nifty_telegram_bot_github"],
+)
+EOF
             pip install -e .
           fi
           
           # List installed packages to verify
-          pip list | grep -E "nifty|pandas-ta" || echo "Packages not found in pip list"
+          pip list | grep -E "nifty|pandas-ta"
       
       - name: Send startup notification
         run: |
@@ -74,23 +74,20 @@ jobs:
           TWILIO_AUTH_TOKEN: ${{ secrets.TWILIO_AUTH_TOKEN }}
           TWILIO_FROM_NUMBER: ${{ secrets.TWILIO_FROM_NUMBER }}
         run: |
-          # Create a Python script with the fix and import
-          cat > run_script.py << 'EOF'
-          import numpy as np
-          np.NaN = np.nan  # Add NaN to numpy namespace
-          
-          try:
-              import nifty_telegram_bot_github
-              print('Successfully imported and ran nifty_telegram_bot_github')
-          except Exception as e:
-              import traceback
-              print(f'Error running nifty_telegram_bot_github: {e}')
-              traceback.print_exc()
-              exit(1)
-          EOF
-          
-          # Run the script
-          python run_script.py
+          # Run Python with the numpy fix and importing the module directly
+          python -c "
+import numpy as np
+np.NaN = np.nan  # Add NaN to numpy namespace
+
+try:
+    import nifty_telegram_bot_github
+    print('Successfully imported and ran nifty_telegram_bot_github')
+except Exception as e:
+    import traceback
+    print(f'Error running nifty_telegram_bot_github: {e}')
+    traceback.print_exc()
+    exit(1)
+"
       
       - name: Check for errors
         if: steps.run_script.outcome == 'failure'
