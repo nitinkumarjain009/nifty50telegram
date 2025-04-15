@@ -18,40 +18,36 @@ jobs:
         with:
           python-version: '3.10'
       
-      - name: Install dependencies and local package
+      - name: Install dependencies
         run: |
           python -m pip install --upgrade pip
-          
-          # Install dependencies
           if [ -f requirements.txt ]; then 
             pip install -r requirements.txt
           else 
             pip install requests pandas beautifulsoup4 twilio numpy
-            # Install pandas_ta from our forked version with the fix
             pip install git+https://github.com/twopirllc/pandas-ta.git@development
           fi
+      
+      - name: Install script as module
+        run: |
+          # Create simple setup.py
+          python -c "
+          with open('setup.py', 'w') as f:
+              f.write('''from setuptools import setup, find_packages
           
-          # Install the package from the current directory
-          if [ -f setup.py ] || [ -f pyproject.toml ]; then
-            pip install -e .
-          else
-            # If no setup files exist, create a simple setup.py and install
-            echo "Creating temporary setup.py for package installation"
-            cat > setup.py << 'EOF'
-from setuptools import setup, find_packages
-
-setup(
-    name="nifty_bot",
-    version="0.1",
-    packages=find_packages(),
-    py_modules=["nifty_telegram_bot_github"],
-)
-EOF
-            pip install -e .
-          fi
+          setup(
+              name=\"nifty_bot\",
+              version=\"0.1\",
+              packages=find_packages(),
+              py_modules=[\"nifty_telegram_bot_github\"],
+          )
+          ''')
+          "
+          # Install the package
+          pip install -e .
           
-          # List installed packages to verify
-          pip list | grep -E "nifty|pandas-ta"
+          # Verify installation
+          pip list
       
       - name: Send startup notification
         run: |
@@ -62,7 +58,25 @@ EOF
             -d text="🚀 Nifty Bot Analysis started running at $(date)"
           fi
       
-      - name: Run Nifty Bot Script with NaN fix
+      - name: Create runner script
+        run: |
+          python -c "
+          with open('run_script.py', 'w') as f:
+              f.write('''import numpy as np
+          np.NaN = np.nan  # Add NaN to numpy namespace
+          
+          try:
+              import nifty_telegram_bot_github
+              print('Successfully imported and ran nifty_telegram_bot_github')
+          except Exception as e:
+              import traceback
+              print(f'Error running nifty_telegram_bot_github: {e}')
+              traceback.print_exc()
+              exit(1)
+          ''')
+          "
+      
+      - name: Run Nifty Bot Script
         id: run_script
         continue-on-error: true
         env:
@@ -73,27 +87,12 @@ EOF
           TWILIO_ACCOUNT_SID: ${{ secrets.TWILIO_ACCOUNT_SID }}
           TWILIO_AUTH_TOKEN: ${{ secrets.TWILIO_AUTH_TOKEN }}
           TWILIO_FROM_NUMBER: ${{ secrets.TWILIO_FROM_NUMBER }}
-        run: |
-          # Run Python with the numpy fix and importing the module directly
-          python -c "
-import numpy as np
-np.NaN = np.nan  # Add NaN to numpy namespace
-
-try:
-    import nifty_telegram_bot_github
-    print('Successfully imported and ran nifty_telegram_bot_github')
-except Exception as e:
-    import traceback
-    print(f'Error running nifty_telegram_bot_github: {e}')
-    traceback.print_exc()
-    exit(1)
-"
+        run: python run_script.py
       
       - name: Check for errors
         if: steps.run_script.outcome == 'failure'
         run: |
           echo "Script execution failed. Sending notification..."
-          # If you have Telegram integration already, you can send failure notification
           if [ -n "${{ secrets.TELEGRAM_API_KEY }}" ] && [ -n "${{ secrets.TELEGRAM_CHAT_ID }}" ]; then
             curl -s -X POST "https://api.telegram.org/bot${{ secrets.TELEGRAM_API_KEY }}/sendMessage" \
             -d chat_id="${{ secrets.TELEGRAM_CHAT_ID }}" \
